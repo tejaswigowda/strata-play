@@ -56,6 +56,13 @@ test( 'pong: loads, paddle moves, AI tracks, ball bounces without tunneling, sco
 	await expect( page.locator( '#load-overlay' ) ).toBeHidden();
 	const frame = await getSandboxFrame( page );
 
+	// Click-to-play gate (every game, strata-play standard): onFrame/physics
+	// never advance until a real user gesture — dismiss it here the same way a
+	// player's first keypress would (this test context has no touch, so the
+	// gate listens for a keydown, not a click), or the ball/AI/score below
+	// never move.
+	await frame.evaluate( () => window.dispatchEvent( new KeyboardEvent( 'keydown', { code: 'Space', bubbles: true } ) ) );
+
 	const start = await readState( frame );
 	expect( start.scorePlayer ).toBe( 0 );
 	expect( start.scoreAI ).toBe( 0 );

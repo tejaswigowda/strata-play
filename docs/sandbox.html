@@ -30,6 +30,12 @@
 	canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 	#boot-error { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
 		color: #f66; font: 13px/1.5 monospace; padding: 24px; text-align: center; background: #000; }
+	#strata-start-gate { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+		background: rgba(0,0,0,0.45); color: #fff; font: 600 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+		cursor: pointer; letter-spacing: 0.02em; -webkit-user-select: none; user-select: none; }
+	#strata-start-gate .ping { padding: 14px 22px; border: 1px solid rgba(255,255,255,0.4); border-radius: 999px;
+		background: rgba(0,0,0,0.35); animation: strata-gate-pulse 1.6s ease-in-out infinite; }
+	@keyframes strata-gate-pulse { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
 </style>
 <!--
 	Pinned runtime stack — covenant #2 ("outlasts the engine" needs frozen
@@ -207,6 +213,8 @@
 	import * as THREE from 'three';
 	import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 	import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+	import { VRButton } from 'three/addons/webxr/VRButton.js';
+	import { ARButton } from 'three/addons/webxr/ARButton.js';
 	import { createS, autoLabel } from '@tejaswigowda/3dom';
 
 	// Draco-compressed meshes are common enough from real-world exporters that
@@ -285,8 +293,8 @@
 		const held = new Set();
 		const ndc = new THREE.Vector2();
 		let hasPointer = false;
-		let dragStartY = null;
-		let dragY = 0; // -1..1, decays back to 0 on pointer up
+		let dragStartX = null;
+		let dragX = 0; // -1..1, decays back to 0 on pointer up
 
 		function updateNdc( ev ) {
 
@@ -301,12 +309,12 @@
 
 			updateNdc( ev );
 
-			if ( type === 'down' ) dragStartY = ev.clientY;
-			else if ( type === 'up' ) { dragStartY = null; dragY = 0; }
-			else if ( type === 'move' && dragStartY !== null ) {
+			if ( type === 'down' ) dragStartX = ev.clientX;
+			else if ( type === 'up' ) { dragStartX = null; dragX = 0; }
+			else if ( type === 'move' && dragStartX !== null ) {
 
 				const rect = canvas.getBoundingClientRect();
-				dragY = Math.max( - 1, Math.min( 1, - ( ev.clientY - dragStartY ) / ( rect.height / 2 ) ) );
+				dragX = Math.max( - 1, Math.min( 1, ( ev.clientX - dragStartX ) / ( rect.width / 2 ) ) );
 
 			}
 
@@ -343,13 +351,14 @@
 			},
 			isDown: ( code ) => held.has( code ),
 			// axis('KeyS','KeyW') -> -1..1 from held keys, falling back to a
-			// pointer/touch vertical drag when no bound key is held at all.
+			// pointer/touch HORIZONTAL drag when no bound key is held at all
+			// (matches a left/right paddle-style game, e.g. Pong — the common case).
 			axis: ( negCodes, posCodes ) => {
 
 				const neg = negCodes.some( ( c ) => held.has( c ) );
 				const pos = posCodes.some( ( c ) => held.has( c ) );
 				const keyVal = ( pos ? 1 : 0 ) - ( neg ? 1 : 0 );
-				return keyVal !== 0 ? keyVal : dragY;
+				return keyVal !== 0 ? keyVal : dragX;
 
 			},
 		};
@@ -462,7 +471,13 @@
 	async function boot( { source, file } ) {
 
 		const canvas = document.createElement( 'canvas' );
+		// Focusable + proactively focused: a keydown only ever reaches THIS
+		// document if it already has focus, and nothing else does that for an
+		// iframe automatically — without this, "press any key to start" would
+		// silently do nothing until the player clicked first anyway.
+		canvas.tabIndex = -1;
 		document.body.appendChild( canvas );
+		canvas.focus();
 
 		const camera = new THREE.PerspectiveCamera( 50, innerWidth / innerHeight, 0.05, 1000 );
 
@@ -470,6 +485,30 @@
 		renderer.setPixelRatio( Math.min( devicePixelRatio || 1, 2 ) );
 		renderer.setSize( innerWidth, innerHeight );
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+		// WebXR (strata-play standard, every game — never per-game code): any
+		// scene is automatically playable in VR/AR headsets with zero game-side
+		// work. Buttons only ever appear when the browser actually reports
+		// support (`isSessionSupported`), so a desktop/mobile visitor with no
+		// XR runtime never sees a dead button.
+		renderer.xr.enabled = true;
+		if ( navigator.xr ) {
+
+			navigator.xr.isSessionSupported( 'immersive-vr' ).then( ( ok ) => { if ( ok ) document.body.appendChild( VRButton.createButton( renderer ) ); } ).catch( () => {} );
+			// Both buttons use three's own identical fixed "bottom center"
+			// styling, so a device supporting both sessions gets two buttons
+			// stacked directly on top of each other unless one is nudged —
+			// stack the AR button above the VR button instead of overlapping.
+			navigator.xr.isSessionSupported( 'immersive-ar' ).then( ( ok ) => {
+
+				if ( ! ok ) return;
+				const arButton = ARButton.createButton( renderer );
+				arButton.style.bottom = '74px';
+				document.body.appendChild( arButton );
+
+			} ).catch( () => {} );
+
+		}
 
 		window.addEventListener( 'resize', () => {
 
@@ -637,12 +676,44 @@
 
 		await mod.default( ctx );
 
+		// ── Click-to-play gate (strata-play standard, every game, never per-game
+		// code): game logic (onFrame/physics) never advances until a real user
+		// gesture — avoids audio-autoplay-policy failures for any game that adds
+		// WebAudio later, and stops input/AI/physics running before the player
+		// has actually looked at the scene. Rendering starts immediately (the
+		// scene is fully visible behind the prompt) — only the fixed-step loop
+		// below is held back. The gesture is strictly device-appropriate, not
+		// just device-labeled: a coarse pointer (touch) can't reliably hold a
+		// key down, so ONLY tap/click dismisses it there; anything else (mouse
+		// + keyboard) has no touch surface to tap, so ONLY a keypress does.
+		// Entering an XR session (or a controller trigger once inside one)
+		// opens the gate too — there's no mouse/keyboard/touch at all once a
+		// headset is on.
+		const isTouch = matchMedia( '(pointer: coarse)' ).matches || navigator.maxTouchPoints > 0;
+		const gateLabel = isTouch ? 'Tap to play' : 'Press any key to play';
+
+		const startGate = document.createElement( 'div' );
+		startGate.id = 'strata-start-gate';
+		startGate.setAttribute( 'role', 'button' );
+		startGate.setAttribute( 'aria-label', gateLabel );
+		startGate.innerHTML = `<div class="ping">${ gateLabel }</div>`;
+		document.body.appendChild( startGate );
+
+		let gateOpen = false;
+		const openGate = () => { if ( gateOpen ) return; gateOpen = true; startGate.remove(); canvas.focus(); };
+		if ( isTouch ) startGate.addEventListener( 'pointerdown', openGate, { once: true } );
+		else window.addEventListener( 'keydown', openGate, { once: true } );
+
+		renderer.xr.addEventListener( 'sessionstart', openGate );
+		renderer.xr.getController( 0 ).addEventListener( 'selectstart', openGate );
+		renderer.xr.getController( 1 ).addEventListener( 'selectstart', openGate );
+
 		// §5 physics honesty: a REAL fixed-timestep accumulator, not just
 		// cannon-es's own internal one — onFrame callbacks (and one physics
 		// step) always advance by exactly FIXED_DT regardless of the render
 		// framerate, so the same inputs produce the same result on a given
 		// pinned build (Playwright-repeatable). Rendering still happens once
-		// per rAF, decoupled from the logic rate.
+		// per frame, decoupled from the logic rate.
 		const FIXED_DT = 1 / 60;
 		const MAX_CATCHUP_STEPS = 5; // drop catch-up work rather than spiral-of-death after a stall
 		let accumulator = 0;
@@ -652,42 +723,50 @@
 
 			const frameDt = Math.min( ( now - last ) / 1000, 0.25 );
 			last = now;
-			accumulator += frameDt;
 
-			let steps = 0;
-			while ( accumulator >= FIXED_DT && steps < MAX_CATCHUP_STEPS ) {
+			if ( gateOpen ) {
 
-				for ( const { object3d, body } of kinematicBodies ) {
+				accumulator += frameDt;
 
-					body.position.set( object3d.position.x, object3d.position.y, object3d.position.z );
-					body.quaternion.set( object3d.quaternion.x, object3d.quaternion.y, object3d.quaternion.z, object3d.quaternion.w );
+				let steps = 0;
+				while ( accumulator >= FIXED_DT && steps < MAX_CATCHUP_STEPS ) {
+
+					for ( const { object3d, body } of kinematicBodies ) {
+
+						body.position.set( object3d.position.x, object3d.position.y, object3d.position.z );
+						body.quaternion.set( object3d.quaternion.x, object3d.quaternion.y, object3d.quaternion.z, object3d.quaternion.w );
+
+					}
+
+					if ( world ) world.step( FIXED_DT, FIXED_DT, 1 ); // we ARE the accumulator now — no internal sub-stepping needed
+
+					for ( const { object3d, body } of boundBodies ) {
+
+						object3d.position.set( body.position.x, body.position.y, body.position.z );
+						object3d.quaternion.set( body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w );
+
+					}
+
+					for ( const fn of frameCallbacks ) { try { fn( FIXED_DT, now / 1000 ); } catch ( e ) { console.error( e ); } }
+
+					accumulator -= FIXED_DT;
+					steps ++;
 
 				}
 
-				if ( world ) world.step( FIXED_DT, FIXED_DT, 1 ); // we ARE the accumulator now — no internal sub-stepping needed
-
-				for ( const { object3d, body } of boundBodies ) {
-
-					object3d.position.set( body.position.x, body.position.y, body.position.z );
-					object3d.quaternion.set( body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w );
-
-				}
-
-				for ( const fn of frameCallbacks ) { try { fn( FIXED_DT, now / 1000 ); } catch ( e ) { console.error( e ); } }
-
-				accumulator -= FIXED_DT;
-				steps ++;
+				if ( steps === MAX_CATCHUP_STEPS ) accumulator = 0;
 
 			}
 
-			if ( steps === MAX_CATCHUP_STEPS ) accumulator = 0;
-
 			renderer.render( scene, camera );
-			requestAnimationFrame( loop );
 
 		}
 
-		requestAnimationFrame( loop );
+		// setAnimationLoop (not a manual requestAnimationFrame chain) is the
+		// one loop API that transparently drives BOTH a normal rAF cadence and
+		// an active WebXR session's own per-frame callback — required for the
+		// headset path to render at all once a VR/AR session starts.
+		renderer.setAnimationLoop( loop );
 
 		postToParent( { type: 'strata:loaded' } );
 

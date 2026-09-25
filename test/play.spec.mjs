@@ -21,6 +21,17 @@ async function waitForLoaded( page ) {
 
 }
 
+// Click-to-play gate (strata-play standard, every game): onFrame/physics never
+// advance until a real user gesture — tests that depend on time-based
+// progress (an animation, AI, physics) must dismiss it first, the same way a
+// player's first keypress would (this test context has no touch, so the gate
+// listens for a keydown, not a click).
+async function dismissStartGate( frame ) {
+
+	await frame.evaluate( () => window.dispatchEvent( new KeyboardEvent( 'keydown', { code: 'Space', bubbles: true } ) ) );
+
+}
+
 // Dispatches a real PointerEvent at the coin's own projected screen position —
 // simulated input through the actual DOM listener runtime.js wires up, not a
 // call straight into game logic.
@@ -85,6 +96,10 @@ test.describe( 'strata-play — hello example', () => {
 		expect( finalScore ).toBe( 3 );
 
 		// ── All three collected → the door opens (position changes over time) ─
+		// The door's slide is driven by onFrame, which is held behind the
+		// click-to-play gate until now — scoring itself (input.onPointer) never
+		// was gated, matching a real player clicking coins before ever "starting".
+		await dismissStartGate( frame );
 		await page.waitForTimeout( 1800 );
 		const doorEndY = await frame.evaluate( () => window.$S( '#door' ).toArray()[ 0 ].position.y );
 		expect( doorEndY ).toBeGreaterThan( doorStartY + 0.5 );

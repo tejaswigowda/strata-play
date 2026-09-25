@@ -110,9 +110,25 @@
 
 	}
 
-	async function fetchFromCdn( url ) {
+	async function fetchFromCdn( url, attempt ) {
 
-		const res = await fetch( url, { cache: 'no-store' } );
+		let res;
+		try {
+
+			res = await fetch( url, { cache: 'no-store' } );
+
+		} catch ( e ) {
+
+			// A transient network hiccup (cold DNS, a dropped connection, a
+			// momentary CDN edge failure) rejects fetch() itself rather than
+			// resolving with a bad status — retry once after a short backoff
+			// before giving up on this URL, since a first paint is exactly when
+			// this kind of blip is most visible (cold connection, cold caches).
+			if ( ! attempt ) { await new Promise( ( r ) => setTimeout( r, 400 ) ); return fetchFromCdn( url, 1 ); }
+			throw new Error( `network error fetching ${ url } — ${ e.message }` );
+
+		}
+
 		if ( ! res.ok ) throw new Error( `HTTP ${ res.status } at ${ url }` );
 		return res;
 

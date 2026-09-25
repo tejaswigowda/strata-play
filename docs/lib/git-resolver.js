@@ -91,7 +91,7 @@ function backendsFor( mode ) {
 
 }
 
-async function fetchFromCdn( url ) {
+async function fetchFromCdn( url, attempt ) {
 
 	let res;
 	try {
@@ -100,6 +100,12 @@ async function fetchFromCdn( url ) {
 
 	} catch ( e ) {
 
+		// A transient network hiccup (cold DNS, a dropped connection, a
+		// momentary CDN edge failure) rejects fetch() itself rather than
+		// resolving with a bad status — retry once after a short backoff
+		// before giving up on this URL, since a first paint is exactly when
+		// this kind of blip is most visible (cold connection, cold caches).
+		if ( ! attempt ) { await new Promise( ( r ) => setTimeout( r, 400 ) ); return fetchFromCdn( url, 1 ); }
 		throw new SceneFetchError( 'network', `network error fetching ${ url } — ${ e.message }` );
 
 	}

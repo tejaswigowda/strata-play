@@ -36,8 +36,11 @@ it's a content script some other tool/extension injected into the page, not
 anything this app touches.)
 
 Open `http://127.0.0.1:5510/` — with no URL hash it boots the bundled seed
-example (`examples/hello/`) straight away, no GitHub repo required. To play a
-game from a real repo:
+example (`examples/hello/`) straight away behind the scenes, no GitHub repo
+required, but also opens the Menu straight to "Load from repo" with a hint
+("No play repo configured yet…") — a bare visit is always immediately
+playable, but never silently looks like it's pointed at your own game when it
+isn't. To play a game from a real repo:
 
 ```
 http://127.0.0.1:5510/#repo=owner/repo&file=game.glb
@@ -233,7 +236,10 @@ The **Menu** button (top-left) opens the one place all git controls live:
 (`repo` / `commit` / `file` / `present`, building the exact `#repo=…` hash
 above and reloading), and the **GitHub token** field Fork also opens
 automatically the first time it needs one. Opening the menu while a `#repo=`
-game is loaded pre-fills the load form from what's currently playing.
+game is loaded pre-fills the load form from what's currently playing. A bare
+visit (no `#repo=` hash at all) opens the menu automatically, on the Load-from-repo
+form, with a hint that no play repo is configured yet — the bundled example
+keeps running behind it either way, so the menu is a nudge, never a blocker.
 
 ## Dev / verify loop
 
@@ -261,12 +267,12 @@ Per the strata-games work order's own discipline ("implemented ≠ verified"):
 - §4 label → physics body vocabulary — exercised by Pong (`.static`/`.kinematic`/`.dynamic`).
 - §5 fixed timestep + CCD wiring — exercised by Pong (`extras.ccd` on the ball); determinism holds across the repeated local runs in this dev loop.
 - §6 deploy contract (CDN-resolved, importmap-pinned, `#repo=` hash scheme) — `test/play.spec.mjs`, and manually via `#example=`.
-- §7 Pong acceptance criteria 1 (bundled-route load only — see below), 2, 3, 4, 5 — `test/pong.spec.mjs`.
+- §7 Pong acceptance criteria 1-5 — `test/pong.spec.mjs` (criteria 2-5 via the bundled `#example=pong` route), and criterion 1's literal form (a real, pushed `#repo=owner/repo&file=game.glb` URL) manually against `tejaswigowda/test1` (`outputs/pong.glb` + a generated `outputs/pong.js` entry, committed via the GitHub Contents API and loaded end-to-end: paddle input, AI, scoring, and the 7-point win condition all verified live).
+- Static hosting needs nothing beyond a plain file server: the served app (`docs/`) was verified end-to-end on GitHub Pages behind a custom domain (no node server, no build step) — every file, the CDN CORS headers (`Access-Control-Allow-Origin: *`, including for the sandbox's opaque `Origin: null`), the page's own CSP, and all three pinned import-map URLs (three/cannon-es/3dom) all resolve correctly as served.
 - No same-origin fetch from the sandbox on any static host — verified against `python -m http.server` (no CORS headers at all) with zero console errors.
 - Default-camera framing is scale-correct for any real-world scene, not just this repo's own hand-built examples — a real-world glTF (`tejaswigowda/test1`, a room-scale kitchen scene) initially rendered as a flat, featureless gray fill until the user dragged the mouse. Root cause (confirmed via a raycast from the camera, not a compositor/rendering bug): the default camera pose was a fixed, hardcoded position/lookAt tuned for this repo's own small, hand-built scenes, so on a much larger scene it ended up 0.4 units from a wall, filling the whole frame with one point-blank polygon face. Dragging only "fixed" it by accident (OrbitControls rotation moved the camera off that wall). Fixed by framing the camera (and the default orbit-view fallback's target) from the loaded scene's own `THREE.Box3` bounds instead of a magic-number pose — verified via the same real repo, screenshotted with zero interaction.
 
 **Expected, not yet verified** (be precise about the gap, not silent about it):
-- §7 acceptance criterion 1's literal form — loading Pong from a real, pushed `#repo=owner/repo&file=game.glb` URL. This repo hasn't been pushed to GitHub yet in this dev loop, so that exact path is untested here; `test/pong.spec.mjs` exercises the identical scene/entry/harness code via the bundled `#example=pong` route instead (the only difference is which resolver branch supplies the bytes — CDN vs. embedded).
 - §7 acceptance criterion 6 ("the §1.5 red-team checklist passes for this game's sandbox") is verified once, generically, against the shared sandbox boundary rather than re-run per game — the isolation mechanism is identical for every game, so a per-game re-run would add no new coverage.
 - §2's "editor's live-preview MUST run inside the same sandbox as the player" — that's strata-editor's own preview path, out of this repo's scope; not implemented or verified here.
 - The Unity handoff half of §7 (glTFast import, labels → colliders, Y-up flip) — out of this repo's scope entirely (web path only).

@@ -42,6 +42,7 @@ const els = {
 	menuOverlay: document.getElementById( 'menu-overlay' ),
 	menuNewBtn: document.getElementById( 'menu-new' ),
 	menuExamplesBtn: document.getElementById( 'menu-examples' ),
+	menuLoadHint: document.getElementById( 'menu-load-hint' ),
 	menuRepoInput: document.getElementById( 'menu-repo' ),
 	menuCommitInput: document.getElementById( 'menu-commit' ),
 	menuFileInput: document.getElementById( 'menu-file' ),
@@ -301,7 +302,7 @@ function restart() {
 
 // ── Menu ("New" / "Examples" / Git load) ──────────────────────────────────────
 
-function openMenu() {
+function openMenu( hint ) {
 
 	// Pre-fill the git-load fields from whatever's currently loaded, so the
 	// menu also doubles as "what am I playing" and is easy to tweak/re-share.
@@ -313,6 +314,9 @@ function openMenu() {
 		els.menuPresentInput.checked = current.source.mode === 'present';
 
 	}
+
+	els.menuLoadHint.textContent = hint || '';
+	els.menuLoadHint.hidden = ! hint;
 
 	els.menuOverlay.hidden = false;
 
@@ -441,10 +445,17 @@ els.menuOverlay.addEventListener( 'click', ( ev ) => {
 } );
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-// No #repo= hash routes straight to "new" — the menu is reachable any time via
-// the Menu button, but a bare visit is always immediately playable.
+// No #repo= hash still boots straight into the bundled example (always
+// immediately playable) but ALSO opens the menu on the Load-from-repo form
+// with a hint — a bare visit otherwise looks configured when it isn't.
 
 const hashSource = parseHash();
 const initialLoad = hashSource ? resolveGitSource( hashSource ) : loadNewLocalGame();
 
 bootSandbox( initialLoad );
+if ( ! hashSource ) {
+
+	openMenu( 'No play repo configured yet — enter one below to load your own game.' );
+	els.menuRepoInput.focus();
+
+}

@@ -71,6 +71,9 @@
 	#menu-overlay label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.8; margin: 8px 0; }
 	#menu-overlay .row { display: flex; gap: 8px; }
 	#menu-overlay .row button { flex: 1; }
+	#menu-load-hint { margin: 0 0 12px; padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.4;
+		background: rgba(108,196,255,0.1); border: 1px solid rgba(108,196,255,0.35); color: #bfe4ff; }
+	#menu-load-hint[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -109,6 +112,7 @@
 				<button id="menu-examples" class="option" disabled>Examples <span class="badge">coming soon</span></button>
 
 				<h3>Load from repo</h3>
+				<p id="menu-load-hint" hidden></p>
 				<div class="field"><input id="menu-repo" type="text" placeholder="owner/repo" autocomplete="off"></div>
 				<div class="field"><input id="menu-commit" type="text" placeholder="branch / tag / commit (optional)" autocomplete="off"></div>
 				<div class="field"><input id="menu-file" type="text" placeholder="path/to/game.glb" value="game.glb" autocomplete="off"></div>

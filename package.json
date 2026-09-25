@@ -1,0 +1,15 @@
+{
+	"name": "strata-play",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Hosted, sandboxed player for Strata games — loads a game repo by URL hash, runs it, lets you fork it.",
+	"type": "module",
+	"scripts": {
+		"start": "node server.js",
+		"build:hello": "node examples/hello/build-scene.mjs",
+		"test": "playwright test"
+	},
+	"devDependencies": {
+		"@playwright/test": "^1.63.0"
+	}
+}

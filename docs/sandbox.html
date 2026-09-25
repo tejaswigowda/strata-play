@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Strata game (sandbox)</title>
+<!--
+	Defense-in-depth on top of origin isolation (work order §1.4): opaque
+	origin already makes host secrets unreachable, this just shrinks what a
+	malicious game could exfiltrate TO. connect-src is the two CDN backends
+	git-resolver.js ever talks to (any GitHub-hosted game resolves through one
+	of these two), plus blob: — GLTFLoader decodes a GLB's embedded textures by
+	creating a blob: URL and fetching it internally (same-document content,
+	never a network exfil vector) — nothing else. blob: in script-src is the
+	entry-module import (see loadEntry below); 'unsafe-inline' covers this
+	page's own inline scripts/styles (no per-request nonce is possible on
+	plain static hosting).
+-->
+<meta http-equiv="Content-Security-Policy" content="
+	default-src 'none';
+	script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net;
+	connect-src 'self' blob: https://cdn.jsdelivr.net https://raw.githubusercontent.com;
+	img-src 'self' data: blob: https://cdn.jsdelivr.net https://raw.githubusercontent.com;
+	style-src 'self' 'unsafe-inline';
+	base-uri 'none';
+	object-src 'none';
+	frame-src 'none';
+">
+<style>
+	html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+	canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+	#boot-error { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+		color: #f66; font: 13px/1.5 monospace; padding: 24px; text-align: center; background: #000; }
+</style>
+<!--
+	Pinned runtime stack — covenant #2 ("outlasts the engine" needs frozen
+	deps). Exact versions, never @latest. Raycaster ships as part of three
+	itself; cannon-es is mapped here but only actually imported by the boot
+	script below when the loaded scene's own labels need physics (auto-
+	detected — see applyPhysicsLabels), so a non-physics game never pays for
+	it. 3DOM is consumed exactly the way strata-editor consumes it (see that
+	repo's README) — pinned jsDelivr build of the GitHub repo, three as 3DOM's
+	peer dependency resolved through this same import map.
+-->
+<script type="importmap">
+{ "imports": {
+	"three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+	"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+	"cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js",
+	"@tejaswigowda/3dom": "https://cdn.jsdelivr.net/gh/tejaswigowda/3dom@v1.0.0/dist/3dom.esm.min.js"
+} }
+</script>
+</head>
+<body>
+	<div id="boot-error"></div>
+	<!--
+		This document is the UNTRUSTED half of the app. It is only ever loaded
+		via <iframe sandbox="allow-scripts"> (no allow-same-origin) from
+		index.html, which gives it an opaque origin: no access to the host's
+		localStorage/cookies, no access to window.parent's DOM. Everything it
+		needs (which repo/ref, the game's own .glb path) arrives over
+		postMessage from play.js — there is no separate manifest file; a game
+		repo is just <basename>.glb + <basename>.js.
+
+		Everything below is ONE inline module script, not `src="runtime.js"` —
+		deliberately. An opaque-origin document treats even a fetch back to
+		its OWN host as cross-origin, so a separate same-origin script file
+		would need this repo's server to send Access-Control-Allow-Origin on
+		every response (most plain static servers — VS Code Live Server/Live
+		Preview, `python -m http.server`, GitHub Pages defaults, etc. — don't).
+		Inlining sidesteps that: this code arrives as part of the document
+		itself (a normal navigation, never subject to CORS), so strata-play
+		works on ANY static host without special headers, exactly like
+		strata-editor (which sidesteps the same class of problem by simply not
+		sandboxing). The `import`s below for three/cannon-es/3dom are
+		unaffected either way — those are genuine cross-origin CDN fetches
+		that already send Access-Control-Allow-Origin.
+
+		For the SAME reason, `resolveAssetBytes` here is a deliberately
+		duplicated, trimmed copy of lib/git-resolver.js's function (that file
+		remains the canonical version — imported normally by play.js, which
+		runs in the host's ordinary, non-opaque origin and never hits this
+		problem). Keep the two in sync by hand if the resolver's fetch logic
+		changes; see that file for the fuller version (scene-index lookup,
+		offline cache fallback) this one intentionally omits.
+	-->
+	<script type="module">
+
+	// ── Asset resolver (trimmed mirror of lib/git-resolver.js) ────────────────
+	function encodePath( path ) {
+
+		return path.split( '/' ).map( encodeURIComponent ).join( '/' );
+
+	}
+
+	function jsdelivrUrl( owner, repo, ref, path ) {
+
+		return `https://cdn.jsdelivr.net/gh/${ owner }/${ repo }@${ ref }/${ encodePath( path ) }`;
+
+	}
+
+	function rawUrl( owner, repo, ref, path ) {
+
+		return `https://raw.githubusercontent.com/${ owner }/${ repo }/${ ref }/${ encodePath( path ) }`;
+
+	}
+
+	function backendsFor( mode ) {
+
+		return mode === 'present' ? [ jsdelivrUrl, rawUrl ] : [ rawUrl, jsdelivrUrl ];
+
+	}
+
+	async function fetchFromCdn( url ) {
+
+		const res = await fetch( url, { cache: 'no-store' } );
+		if ( ! res.ok ) throw new Error( `HTTP ${ res.status } at ${ url }` );
+		return res;
+
+	}
+
+	// Deliberately no apiFetch fallback — api.github.com never enters this path.
+	async function resolveFirst( owner, repo, refs, path, mode ) {
+
+		const backends = backendsFor( mode );
+		const attempts = [];
+
+		for ( const ref of refs ) {
+
+			for ( const build of backends ) {
+
+				try { return { res: await fetchFromCdn( build( owner, repo, ref, path ) ), ref }; }
+				catch ( e ) { attempts.push( `${ ref }: ${ e.message }` ); }
+
+			}
+
+		}
+
+		// Every (ref, backend) combination failed — say which refs were
+		// actually tried, not just the last one, so a repo with only "main"
+		// (no "master") never reads as "it assumed master and gave up" when
+		// main was tried too and the file just isn't there on either.
+		attempts.forEach( ( a ) => console.warn( `strata-play: ${ path } — ${ a }` ) );
+		throw new Error( `"${ path }" not found on ${ refs.join( ' or ' ) }` );
+
+	}
+
+	async function resolveAssetBytes( { owner, repo, ref, path, mode } ) {
+
+		const refs = ref ? [ ref ] : [ 'main', 'master' ];
+		const { res } = await resolveFirst( owner, repo, refs, path, mode );
+		return new Uint8Array( await res.arrayBuffer() );
+
+	}
+
+	// ── Embedded bundled examples ─────────────────────────────────────────────
+	// The bundled examples/*/{game.js,scene.glb} content, inlined for the SAME
+	// reason as everything else on this page — the "no #repo= hash" default
+	// path (and #example=… picking a different bundled one, e.g. the §1.5
+	// red-team game) must never need a same-origin fetch either. Canonical
+	// source stays examples/<name>/*; regenerate this object with
+	// `node scripts/embed-examples.mjs` after editing any example's game.js or
+	// scene.glb.
+	/* EMBEDDED_EXAMPLES:START */
+	const EMBEDDED_EXAMPLES = {"hello":{"gameJs":"// ── game.js ──────────────────────────────────────────────────────────────────\n// The seed example's entry module — plain JS against the ctx contract, no\n// 3DOM extension. A game repo is just two files: this and game.glb — the\n// entry's filename always matches the scene's own basename with a .js\n// extension (auto-resolved, no separate manifest). Click each `.coin` to\n// collect it (it hides, state.score++); once all three are collected, `#door`\n// slides open.\n//\n// This is the pattern any game entry follows: default-export init(ctx), wire\n// input, register onFrame for anything that animates, read/write ctx.state.\n\nexport default function init( ctx ) {\n\n\tconst { $S, input, onFrame, state } = ctx;\n\n\tstate.score = 0;\n\tstate.doorOpen = false;\n\n\tconst TOTAL_COINS = $S( '.coin' ).count;\n\tconst doorOpenDistance = 2.2; // units to slide up before considering the door \"open\"\n\tlet doorAnimating = false;\n\n\tinput.onPointer( ( ev ) => {\n\n\t\tif ( ev.type !== 'down' ) return;\n\n\t\tconst ray = input.pointerRay();\n\t\tif ( ! ray ) return;\n\n\t\tconst coins = $S( '.coin' ).toArray().filter( ( n ) => n.visible );\n\t\tif ( coins.length === 0 ) return;\n\n\t\tconst hits = ray.intersectObjects( coins, false );\n\t\tif ( hits.length === 0 ) return;\n\n\t\t$S( [ hits[ 0 ].object ] ).setVisible( false );\n\t\tstate.score ++;\n\n\t\tif ( state.score >= TOTAL_COINS && ! state.doorOpen ) {\n\n\t\t\tstate.doorOpen = true;\n\t\t\tdoorAnimating = true;\n\n\t\t}\n\n\t} );\n\n\tonFrame( ( dt ) => {\n\n\t\tif ( ! doorAnimating ) return;\n\n\t\tconst door = $S( '#door' ).toArray()[ 0 ];\n\t\tif ( ! door ) { doorAnimating = false; return; }\n\n\t\tif ( door.userData._openTravel === undefined ) door.userData._openTravel = 0;\n\n\t\tconst step = dt * 1.4;\n\t\tconst remaining = doorOpenDistance - door.userData._openTravel;\n\n\t\tif ( remaining <= 0 ) { doorAnimating = false; return; }\n\n\t\tconst move = Math.min( step, remaining );\n\t\t$S( [ door ] ).move( 0, move, 0 );\n\t\tdoor.userData._openTravel += move;\n\n\t} );\n\n}\n","sceneB64":"Z2xURgIAAABoCAAA7AQAAEpTT057ImFzc2V0Ijp7InZlcnNpb24iOiIyLjAiLCJnZW5lcmF0b3IiOiJzdHJhdGEtcGxheSBidWlsZC1zY2VuZS5tanMifSwic2NlbmUiOjAsInNjZW5lcyI6W3sibm9kZXMiOlswLDEsMiwzXX1dLCJub2RlcyI6W3sibmFtZSI6IkNvaW4gMSIsIm1lc2giOjAsInRyYW5zbGF0aW9uIjpbLTEuNCwwLjUsMF0sInNjYWxlIjpbMC4zNSwwLjM1LDAuMzVdfSx7Im5hbWUiOiJDb2luIDIiLCJtZXNoIjowLCJ0cmFuc2xhdGlvbiI6WzAsMC41LDBdLCJzY2FsZSI6WzAuMzUsMC4zNSwwLjM1XX0seyJuYW1lIjoiQ29pbiAzIiwibWVzaCI6MCwidHJhbnNsYXRpb24iOlsxLjQsMC41LDBdLCJzY2FsZSI6WzAuMzUsMC4zNSwwLjM1XX0seyJuYW1lIjoiRG9vciIsIm1lc2giOjEsInRyYW5zbGF0aW9uIjpbMCwxLC0yLjJdLCJzY2FsZSI6WzEuNCwyLDAuMjVdfV0sIm1lc2hlcyI6W3sibmFtZSI6IkNvaW5HZW9tIiwicHJpbWl0aXZlcyI6W3siYXR0cmlidXRlcyI6eyJQT1NJVElPTiI6MCwiTk9STUFMIjoxfSwibWF0ZXJpYWwiOjB9XX0seyJuYW1lIjoiRG9vckdlb20iLCJwcmltaXRpdmVzIjpbeyJhdHRyaWJ1dGVzIjp7IlBPU0lUSU9OIjowLCJOT1JNQUwiOjF9LCJtYXRlcmlhbCI6MX1dfV0sIm1hdGVyaWFscyI6W3sibmFtZSI6IkNvaW4iLCJkb3VibGVTaWRlZCI6dHJ1ZSwicGJyTWV0YWxsaWNSb3VnaG5lc3MiOnsiYmFzZUNvbG9yRmFjdG9yIjpbMSwwLjg0LDAuMiwxXSwibWV0YWxsaWNGYWN0b3IiOjAuNiwicm91Z2huZXNzRmFjdG9yIjowLjM1fX0seyJuYW1lIjoiRG9vciIsImRvdWJsZVNpZGVkIjp0cnVlLCJwYnJNZXRhbGxpY1JvdWdobmVzcyI6eyJiYXNlQ29sb3JGYWN0b3IiOlswLjQsMC4yNSwwLjE1LDFdLCJtZXRhbGxpY0ZhY3RvciI6MC4wNSwicm91Z2huZXNzRmFjdG9yIjowLjg1fX1dLCJhY2Nlc3NvcnMiOlt7ImJ1ZmZlclZpZXciOjAsImNvbXBvbmVudFR5cGUiOjUxMjYsImNvdW50IjozNiwidHlwZSI6IlZFQzMiLCJtaW4iOlstMC41LC0wLjUsLTAuNV0sIm1heCI6WzAuNSwwLjUsMC41XX0seyJidWZmZXJWaWV3IjoxLCJjb21wb25lbnRUeXBlIjo1MTI2LCJjb3VudCI6MzYsInR5cGUiOiJWRUMzIn1dLCJidWZmZXJWaWV3cyI6W3siYnVmZmVyIjowLCJieXRlT2Zmc2V0IjowLCJieXRlTGVuZ3RoIjo0MzIsInRhcmdldCI6MzQ5NjJ9LHsiYnVmZmVyIjowLCJieXRlT2Zmc2V0Ijo0MzIsImJ5dGVMZW5ndGgiOjQzMiwidGFyZ2V0IjozNDk2Mn1dLCJidWZmZXJzIjpbeyJieXRlTGVuZ3RoIjo4NjR9XX0gICBgAwAAQklOAAAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAC/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAPwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAvwAAAD8AAAC/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAvwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAL8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAL8AAAC/AAAAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAA=="},"pong":{"gameJs":"// ── game.js (Pong) ──────────────────────────────────────────────────────────\n// Work order §7 — the first shipped, forkable game. Labels do the physics\n// wiring (Court/Wall * -> .static, Player/AIPaddle -> .kinematic, Ball ->\n// .dynamic with CCD) — this file is just input, a ~5-line AI follow, and\n// score/reset, same as any game written against the plain ctx contract.\n\nexport default function init( ctx ) {\n\n\tconst { $S, input, onFrame, onReset, state, getBody } = ctx;\n\n\tconst player = $S( '#PlayerPaddle' ).toArray()[ 0 ];\n\tconst ai = $S( '#AIPaddle' ).toArray()[ 0 ];\n\tconst ball = $S( '#Ball' ).toArray()[ 0 ];\n\tconst ballBody = getBody( ball );\n\n\tconst HALF_WIDTH = 2.5;      // paddle travel clamp along X\n\tconst PLAYER_SPEED = 5;      // units/sec\n\tconst AI_SPEED = 2.6;        // capped below the player's — beatable\n\tconst SERVE_SPEED = 3.5;\n\tconst OUT_OF_BOUNDS_Z = 5.2; // just past each paddle's Z plane\n\n\tstate.scorePlayer = 0;\n\tstate.scoreAI = 0;\n\n\tfunction serve( towardPlayer ) {\n\n\t\tball.position.set( 0, ball.position.y, 0 );\n\t\tballBody.position.set( 0, ball.position.y, 0 );\n\t\tballBody.velocity.set( ( Math.random() * 2 - 1 ) * 0.6 * SERVE_SPEED, 0, ( towardPlayer ? 1 : - 1 ) * SERVE_SPEED );\n\t\tballBody.angularVelocity.set( 0, 0, 0 );\n\n\t}\n\n\tonReset( () => { state.scorePlayer = 0; state.scoreAI = 0; serve( true ); } );\n\n\tserve( true );\n\n\tonFrame( ( dt ) => {\n\n\t\t// Player input — arrow keys / A-D (a touch/pointer drag falls back to\n\t\t// the SAME axis() call; see sandbox.html's makeInput).\n\t\tconst axis = input.axis( [ 'ArrowLeft', 'KeyA' ], [ 'ArrowRight', 'KeyD' ] );\n\t\tplayer.position.x = Math.max( - HALF_WIDTH, Math.min( HALF_WIDTH, player.position.x + axis * PLAYER_SPEED * dt ) );\n\n\t\t// AI: lerp toward the ball, clamped + speed-capped (beatable). No ML.\n\t\tconst diff = ball.position.x - ai.position.x;\n\t\tconst step = Math.max( - AI_SPEED * dt, Math.min( AI_SPEED * dt, diff ) );\n\t\tai.position.x = Math.max( - HALF_WIDTH, Math.min( HALF_WIDTH, ai.position.x + step ) );\n\n\t\t// Score + deterministic reset once the ball passes a paddle's Z plane.\n\t\tif ( ball.position.z > OUT_OF_BOUNDS_Z ) { state.scoreAI ++; serve( false ); }\n\t\telse if ( ball.position.z < - OUT_OF_BOUNDS_Z ) { state.scorePlayer ++; serve( true ); }\n\n\t} );\n\n}\n","sceneB64":"Z2xURgIAAACADAAABAkAAEpTT057ImFzc2V0Ijp7InZlcnNpb24iOiIyLjAiLCJnZW5lcmF0b3IiOiJzdHJhdGEtcGxheSBidWlsZC1zY2VuZS5tanMgKHBvbmcpIn0sInNjZW5lIjowLCJzY2VuZXMiOlt7Im5vZGVzIjpbMCwxLDIsMyw0LDVdfV0sIm5vZGVzIjpbeyJuYW1lIjoiQ291cnQiLCJtZXNoIjowLCJ0cmFuc2xhdGlvbiI6WzAsLTAuMSwwXSwic2NhbGUiOls2LDAuMiwxMF0sImV4dHJhcyI6eyJjbGFzc2VzIjpbInN0YXRpYyJdfX0seyJuYW1lIjoiV2FsbCAxIiwibWVzaCI6MSwidHJhbnNsYXRpb24iOlstMy4xLDAuNSwwXSwic2NhbGUiOlswLjIsMSwxMF0sImV4dHJhcyI6eyJjbGFzc2VzIjpbInN0YXRpYyJdfX0seyJuYW1lIjoiV2FsbCAyIiwibWVzaCI6MSwidHJhbnNsYXRpb24iOlszLjEsMC41LDBdLCJzY2FsZSI6WzAuMiwxLDEwXSwiZXh0cmFzIjp7ImNsYXNzZXMiOlsic3RhdGljIl19fSx7Im5hbWUiOiJQbGF5ZXJQYWRkbGUiLCJtZXNoIjoyLCJ0cmFuc2xhdGlvbiI6WzAsMC4yNSw0LjVdLCJzY2FsZSI6WzEsMC41LDAuM10sImV4dHJhcyI6eyJjbGFzc2VzIjpbImtpbmVtYXRpYyJdfX0seyJuYW1lIjoiQUlQYWRkbGUiLCJtZXNoIjozLCJ0cmFuc2xhdGlvbiI6WzAsMC4yNSwtNC41XSwic2NhbGUiOlsxLDAuNSwwLjNdLCJleHRyYXMiOnsiY2xhc3NlcyI6WyJraW5lbWF0aWMiXX19LHsibmFtZSI6IkJhbGwiLCJtZXNoIjo0LCJ0cmFuc2xhdGlvbiI6WzAsMC4xNSwwXSwic2NhbGUiOlswLjMsMC4zLDAuM10sImV4dHJhcyI6eyJjbGFzc2VzIjpbImR5bmFtaWMiXSwiY29sbGlkZXIiOiJzcGhlcmUiLCJjY2QiOnRydWV9fV0sIm1lc2hlcyI6W3sibmFtZSI6IkNvdXJ0R2VvbSIsInByaW1pdGl2ZXMiOlt7ImF0dHJpYnV0ZXMiOnsiUE9TSVRJT04iOjAsIk5PUk1BTCI6MX0sIm1hdGVyaWFsIjowfV19LHsibmFtZSI6IldhbGxHZW9tIiwicHJpbWl0aXZlcyI6W3siYXR0cmlidXRlcyI6eyJQT1NJVElPTiI6MCwiTk9STUFMIjoxfSwibWF0ZXJpYWwiOjF9XX0seyJuYW1lIjoiUGxheWVyR2VvbSIsInByaW1pdGl2ZXMiOlt7ImF0dHJpYnV0ZXMiOnsiUE9TSVRJT04iOjAsIk5PUk1BTCI6MX0sIm1hdGVyaWFsIjoyfV19LHsibmFtZSI6IkFJR2VvbSIsInByaW1pdGl2ZXMiOlt7ImF0dHJpYnV0ZXMiOnsiUE9TSVRJT04iOjAsIk5PUk1BTCI6MX0sIm1hdGVyaWFsIjozfV19LHsibmFtZSI6IkJhbGxHZW9tIiwicHJpbWl0aXZlcyI6W3siYXR0cmlidXRlcyI6eyJQT1NJVElPTiI6MCwiTk9STUFMIjoxfSwibWF0ZXJpYWwiOjR9XX1dLCJtYXRlcmlhbHMiOlt7Im5hbWUiOiJDb3VydCIsImRvdWJsZVNpZGVkIjp0cnVlLCJwYnJNZXRhbGxpY1JvdWdobmVzcyI6eyJiYXNlQ29sb3JGYWN0b3IiOlswLjE1LDAuMTYsMC4yLDFdLCJtZXRhbGxpY0ZhY3RvciI6MC4xLCJyb3VnaG5lc3NGYWN0b3IiOjAuN319LHsibmFtZSI6IldhbGwiLCJkb3VibGVTaWRlZCI6dHJ1ZSwicGJyTWV0YWxsaWNSb3VnaG5lc3MiOnsiYmFzZUNvbG9yRmFjdG9yIjpbMC4zLDAuMywwLjM1LDFdLCJtZXRhbGxpY0ZhY3RvciI6MC4xLCJyb3VnaG5lc3NGYWN0b3IiOjAuN319LHsibmFtZSI6IlBsYXllciIsImRvdWJsZVNpZGVkIjp0cnVlLCJwYnJNZXRhbGxpY1JvdWdobmVzcyI6eyJiYXNlQ29sb3JGYWN0b3IiOlswLjIsMC41LDEsMV0sIm1ldGFsbGljRmFjdG9yIjowLjEsInJvdWdobmVzc0ZhY3RvciI6MC43fX0seyJuYW1lIjoiQUkiLCJkb3VibGVTaWRlZCI6dHJ1ZSwicGJyTWV0YWxsaWNSb3VnaG5lc3MiOnsiYmFzZUNvbG9yRmFjdG9yIjpbMSwwLjMsMC4zLDFdLCJtZXRhbGxpY0ZhY3RvciI6MC4xLCJyb3VnaG5lc3NGYWN0b3IiOjAuN319LHsibmFtZSI6IkJhbGwiLCJkb3VibGVTaWRlZCI6dHJ1ZSwicGJyTWV0YWxsaWNSb3VnaG5lc3MiOnsiYmFzZUNvbG9yRmFjdG9yIjpbMSwxLDEsMV0sIm1ldGFsbGljRmFjdG9yIjowLjEsInJvdWdobmVzc0ZhY3RvciI6MC43fX1dLCJhY2Nlc3NvcnMiOlt7ImJ1ZmZlclZpZXciOjAsImNvbXBvbmVudFR5cGUiOjUxMjYsImNvdW50IjozNiwidHlwZSI6IlZFQzMiLCJtaW4iOlstMC41LC0wLjUsLTAuNV0sIm1heCI6WzAuNSwwLjUsMC41XX0seyJidWZmZXJWaWV3IjoxLCJjb21wb25lbnRUeXBlIjo1MTI2LCJjb3VudCI6MzYsInR5cGUiOiJWRUMzIn1dLCJidWZmZXJWaWV3cyI6W3siYnVmZmVyIjowLCJieXRlT2Zmc2V0IjowLCJieXRlTGVuZ3RoIjo0MzIsInRhcmdldCI6MzQ5NjJ9LHsiYnVmZmVyIjowLCJieXRlT2Zmc2V0Ijo0MzIsImJ5dGVMZW5ndGgiOjQzMiwidGFyZ2V0IjozNDk2Mn1dLCJidWZmZXJzIjpbeyJieXRlTGVuZ3RoIjo4NjR9XX0gYAMAAEJJTgAAAAC/AAAAvwAAAD8AAAA/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAPwAAAL8AAAC/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAD8AAAC/AAAAvwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAPwAAAL8AAAA/AAAAvwAAAD8AAAA/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAvwAAAD8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAPwAAAD8AAAA/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAA/AAAAPwAAAL8AAAC/AAAAPwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAC/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAC/AAAAvwAAAD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAA="},"redteam":{"gameJs":"// ── game.js (red-team) ──────────────────────────────────────────────────────\n// Deliberately hostile — attempts the work order's §1.5 acceptance checklist\n// from inside a running game, using raw browser globals (not ctx) wherever a\n// real attacker would, since ctx never restricts what JS in this realm CAN\n// call, only what the host RECOGNIZES over postMessage. Every attempt must\n// fail. Results land in ctx.state.redteam for test/play.spec.mjs to read.\n\nexport default function init( ctx ) {\n\n\tconst { state } = ctx;\n\tstate.redteam = {\n\t\ttoken: 'pending',\n\t\townStorage: 'pending',\n\t\tparentDom: 'pending',\n\t\tgithubApi: 'pending',\n\t\tforgedSave: 'pending',\n\t};\n\n\t// 1. Read the host's GitHub token — the only conceivable path is via\n\t// window.parent's storage (the token never enters this frame at all).\n\ttry { void window.parent.localStorage; state.redteam.token = 'leaked'; }\n\tcatch { state.redteam.token = 'blocked'; }\n\n\t// 2. Read/write THIS frame's own storage — opaque origin, should also fail.\n\ttry { window.localStorage.setItem( 'x', '1' ); state.redteam.ownStorage = 'leaked'; }\n\tcatch { state.redteam.ownStorage = 'blocked'; }\n\n\t// 3. Reach window.parent's DOM, and attempt to navigate the top frame.\n\t// Whether the navigation attempt actually took effect is verified from\n\t// OUTSIDE this sandbox (test/play.spec.mjs checks the host page's own URL\n\t// never changed) — a successful navigation would tear down this very\n\t// frame before it could report anything, so it can't self-report that one.\n\ttry { void window.parent.document; state.redteam.parentDom = 'leaked'; }\n\tcatch { state.redteam.parentDom = 'blocked'; }\n\ttry { window.top.location.href = 'https://example.invalid/evil'; } catch { /* blocked synchronously — fine either way */ }\n\n\t// 4. Call the GitHub API directly — no token is ever attached (this frame\n\t// never has one), and the sandbox's CSP connect-src doesn't list\n\t// api.github.com at all, so the request itself is refused before any of\n\t// that matters.\n\tfetch( 'https://api.github.com/user' )\n\t\t.then( () => { state.redteam.githubApi = 'reached'; } )\n\t\t.catch( () => { state.redteam.githubApi = 'blocked'; } );\n\n\t// 5. postMessage a forged \"save\" for a path outside this game's own repo —\n\t// via the raw `parent` global, bypassing ctx entirely, exactly how real\n\t// hostile code would. play.js must validate and reject this, never act on it.\n\twindow.addEventListener( 'message', ( event ) => {\n\n\t\tconst msg = event.data;\n\t\tif ( ! msg || msg.type !== 'strata:save-rejected' ) return;\n\t\tstate.redteam.forgedSave = 'rejected';\n\t\tstate.redteam.forgedSaveReason = msg.reason;\n\n\t} );\n\twindow.parent.postMessage( { type: 'strata:save', path: '../../outside-repo/pwned.json', bytes: 42 }, '*' );\n\n}\n","sceneB64":"Z2xURgIAAABIBgAAzAIAAEpTT057ImFzc2V0Ijp7InZlcnNpb24iOiIyLjAiLCJnZW5lcmF0b3IiOiJzdHJhdGEtcGxheSBidWlsZC1zY2VuZS5tanMgKHJlZHRlYW0pIn0sInNjZW5lIjowLCJzY2VuZXMiOlt7Im5vZGVzIjpbMF19XSwibm9kZXMiOlt7Im5hbWUiOiJUYXJnZXQiLCJtZXNoIjowfV0sIm1lc2hlcyI6W3sibmFtZSI6IlRhcmdldEdlb20iLCJwcmltaXRpdmVzIjpbeyJhdHRyaWJ1dGVzIjp7IlBPU0lUSU9OIjowLCJOT1JNQUwiOjF9LCJtYXRlcmlhbCI6MH1dfV0sIm1hdGVyaWFscyI6W3sibmFtZSI6IlRhcmdldCIsImRvdWJsZVNpZGVkIjp0cnVlLCJwYnJNZXRhbGxpY1JvdWdobmVzcyI6eyJiYXNlQ29sb3JGYWN0b3IiOlswLjgsMC4xLDAuMSwxXX19XSwiYWNjZXNzb3JzIjpbeyJidWZmZXJWaWV3IjowLCJjb21wb25lbnRUeXBlIjo1MTI2LCJjb3VudCI6MzYsInR5cGUiOiJWRUMzIiwibWluIjpbLTAuNSwtMC41LC0wLjVdLCJtYXgiOlswLjUsMC41LDAuNV19LHsiYnVmZmVyVmlldyI6MSwiY29tcG9uZW50VHlwZSI6NTEyNiwiY291bnQiOjM2LCJ0eXBlIjoiVkVDMyJ9XSwiYnVmZmVyVmlld3MiOlt7ImJ1ZmZlciI6MCwiYnl0ZU9mZnNldCI6MCwiYnl0ZUxlbmd0aCI6NDMyLCJ0YXJnZXQiOjM0OTYyfSx7ImJ1ZmZlciI6MCwiYnl0ZU9mZnNldCI6NDMyLCJieXRlTGVuZ3RoIjo0MzIsInRhcmdldCI6MzQ5NjJ9XSwiYnVmZmVycyI6W3siYnl0ZUxlbmd0aCI6ODY0fV19IGADAABCSU4AAAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAAAPwAAAL8AAAC/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAD8AAAC/AAAAvwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAA/AAAAvwAAAD8AAAC/AAAAPwAAAL8AAAA/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAC/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAvwAAAL8AAAA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAvwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAAAAAAAAAAgL8AAAAA"}};
+	/* EMBEDDED_EXAMPLES:END */
+
+	function base64ToBytes( b64 ) {
+
+		const binary = atob( b64 );
+		const bytes = new Uint8Array( binary.length );
+		for ( let i = 0; i < binary.length; i ++ ) bytes[ i ] = binary.charCodeAt( i );
+		return bytes;
+
+	}
+
+	// ── Runtime ─────────────────────────────────────────────────────────────────
+	// Boot sequence:
+	//   1. Handshake with the host over postMessage (never anything else — no
+	//      access to window.parent's DOM, no access to the host's localStorage).
+	//   2. Fetch the scene .glb + its auto-resolved entry module — genuine
+	//      cross-origin CDN reads for a #repo= game (no bytes relayed through
+	//      postMessage), or the embedded constants above for a bundled example.
+	//   3. autoLabel + createS the loaded scene (auto-detecting whether physics
+	//      is even needed from the labels present), build `ctx`, call the
+	//      game's default-exported init(ctx), start the render loop.
+	//
+	// No 3DOM extension happens here or anywhere in this file — game
+	// interaction is plain JS (see examples/hello/game.js) written against
+	// the plain ctx object below.
+
+	import * as THREE from 'three';
+	import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+	import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+	import { createS, autoLabel } from '@tejaswigowda/3dom';
+
+	// Draco-compressed meshes are common enough from real-world exporters that
+	// a game repo can't be expected to avoid them — decoder pinned to the SAME
+	// jsDelivr build as the rest of the stack (already allowlisted in this
+	// page's own CSP) rather than three.js's gstatic.com default, which this
+	// CSP doesn't (and shouldn't) allowlist.
+	const dracoLoader = new DRACOLoader();
+	dracoLoader.setDecoderPath( 'https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/draco/' );
+
+	function postToParent( msg ) {
+
+		parent.postMessage( msg, '*' );
+
+	}
+
+	function reportError( err ) {
+
+		const message = String( ( err && err.message ) || err );
+		console.error( 'strata-play runtime error:', err );
+		const el = document.getElementById( 'boot-error' );
+		if ( el ) { el.style.display = 'flex'; el.textContent = message; }
+		postToParent( { type: 'strata:error', message } );
+
+	}
+
+	window.addEventListener( 'error', ( e ) => reportError( e.error || e.message ) );
+	window.addEventListener( 'unhandledrejection', ( e ) => reportError( e.reason ) );
+
+	// Local (bundled) example reads its bytes from the embedded constants
+	// above — never a fetch, same-origin or otherwise.
+	function makeAssetFetcher( source ) {
+
+		if ( source.kind === 'git' ) {
+
+			return ( path ) => resolveAssetBytes( { owner: source.owner, repo: source.repo, ref: source.ref, path, mode: source.mode } );
+
+		}
+
+		const example = EMBEDDED_EXAMPLES[ source.example || 'hello' ];
+		if ( ! example ) throw new Error( `no embedded example named "${ source.example }"` );
+
+		// The entry is always .js; anything else is the scene .glb — both sit
+		// under the one embedded example's two keys.
+		return async ( path ) => {
+
+			if ( path.endsWith( '.js' ) ) return new TextEncoder().encode( example.gameJs );
+			return base64ToBytes( example.sceneB64 );
+
+		};
+
+	}
+
+	function loadGLB( bytes ) {
+
+		return new Promise( ( resolve, reject ) => {
+
+			const loader = new GLTFLoader();
+			loader.setDRACOLoader( dracoLoader );
+			const buf = bytes.buffer.slice( bytes.byteOffset, bytes.byteOffset + bytes.byteLength );
+			loader.parse( buf, '', ( gltf ) => resolve( gltf.scene ), reject );
+
+		} );
+
+	}
+
+	// ── Device-abstracted input (pointer + keyboard) ───────────────────────────
+	// "Named actions/axes; device-adaptive" (work order §3) — kept lean: raw
+	// onPointer/onKey/pointerRay for anything bespoke, plus isDown(code) and a
+	// held-keys axis with a pointer-drag fallback so the SAME axis() call
+	// works from a keyboard or a touch/mouse drag without the game caring.
+	function makeInput( canvas, camera ) {
+
+		const pointerHandlers = [];
+		const keyHandlers = [];
+		const held = new Set();
+		const ndc = new THREE.Vector2();
+		let hasPointer = false;
+		let dragStartY = null;
+		let dragY = 0; // -1..1, decays back to 0 on pointer up
+
+		function updateNdc( ev ) {
+
+			const rect = canvas.getBoundingClientRect();
+			ndc.x = ( ( ev.clientX - rect.left ) / rect.width ) * 2 - 1;
+			ndc.y = - ( ( ( ev.clientY - rect.top ) / rect.height ) * 2 - 1 );
+			hasPointer = true;
+
+		}
+
+		function emitPointer( type, ev ) {
+
+			updateNdc( ev );
+
+			if ( type === 'down' ) dragStartY = ev.clientY;
+			else if ( type === 'up' ) { dragStartY = null; dragY = 0; }
+			else if ( type === 'move' && dragStartY !== null ) {
+
+				const rect = canvas.getBoundingClientRect();
+				dragY = Math.max( - 1, Math.min( 1, - ( ev.clientY - dragStartY ) / ( rect.height / 2 ) ) );
+
+			}
+
+			const payload = { type, x: ndc.x, y: ndc.y, clientX: ev.clientX, clientY: ev.clientY, button: ev.button };
+			for ( const fn of pointerHandlers ) { try { fn( payload ); } catch ( e ) { console.error( e ); } }
+
+		}
+
+		canvas.addEventListener( 'pointerdown', ( ev ) => emitPointer( 'down', ev ) );
+		canvas.addEventListener( 'pointermove', ( ev ) => emitPointer( 'move', ev ) );
+		canvas.addEventListener( 'pointerup',   ( ev ) => emitPointer( 'up', ev ) );
+
+		function emitKey( type, ev ) {
+
+			if ( type === 'down' ) held.add( ev.code ); else held.delete( ev.code );
+			const payload = { type, key: ev.key, code: ev.code };
+			for ( const fn of keyHandlers ) { try { fn( payload ); } catch ( e ) { console.error( e ); } }
+
+		}
+
+		window.addEventListener( 'keydown', ( ev ) => emitKey( 'down', ev ) );
+		window.addEventListener( 'keyup',   ( ev ) => emitKey( 'up', ev ) );
+
+		return {
+			onPointer: ( fn ) => pointerHandlers.push( fn ),
+			onKey: ( fn ) => keyHandlers.push( fn ),
+			pointerRay: () => {
+
+				if ( ! hasPointer ) return null;
+				const raycaster = new THREE.Raycaster();
+				raycaster.setFromCamera( ndc, camera );
+				return raycaster;
+
+			},
+			isDown: ( code ) => held.has( code ),
+			// axis('KeyS','KeyW') -> -1..1 from held keys, falling back to a
+			// pointer/touch vertical drag when no bound key is held at all.
+			axis: ( negCodes, posCodes ) => {
+
+				const neg = negCodes.some( ( c ) => held.has( c ) );
+				const pos = posCodes.some( ( c ) => held.has( c ) );
+				const keyVal = ( pos ? 1 : 0 ) - ( neg ? 1 : 0 );
+				return keyVal !== 0 ? keyVal : dragY;
+
+			},
+		};
+
+	}
+
+	// ── Label → physics body vocabulary (work order §4) ────────────────────────
+	// Read from userData (glTF node "extras", copied there by GLTFLoader) BEFORE
+	// autoLabel/createS run, so these ride the same custom-class path a
+	// strata-editor author's hand-added class would. Vocabulary:
+	//   .static     -> static body (mass 0)
+	//   .dynamic    -> rigidbody (mass 1), synced body->object3d each fixed step
+	//   .kinematic  -> kinematic body, synced object3d->body each fixed step
+	//                  (script/input-driven — the body follows the object, not
+	//                  the other way around)
+	//   .trigger    -> sensor only, no collision response
+	// Shape: extras.collider ("box" | "sphere"), default box-from-bounds. No
+	// label -> no body (render-only) — physics is never inferred silently.
+	function applyExtrasAsClasses( scene ) {
+
+		scene.traverse( ( node ) => {
+
+			// three.js's GLTFLoader flattens glTF node "extras" directly onto
+			// userData (Object.assign), so a node authored with
+			// extras:{classes:[...]} arrives as userData.classes — capture that
+			// BEFORE autoLabel/deriveAllClasses overwrites userData.classes with
+			// its own auto-derived Set.
+			const classes = node.userData && node.userData.classes;
+			if ( Array.isArray( classes ) ) node.userData.customClasses = classes;
+
+		} );
+
+	}
+
+	function shapeFor( CANNON, object3d ) {
+
+		const box = new THREE.Box3().setFromObject( object3d, true );
+		const size = box.getSize( new THREE.Vector3() );
+		const hint = object3d.userData && object3d.userData.collider;
+
+		if ( hint === 'sphere' ) return new CANNON.Sphere( Math.max( size.x, size.y, size.z ) / 2 || 0.5 );
+		return new CANNON.Box( new CANNON.Vec3(
+			Math.max( size.x, 1e-3 ) / 2, Math.max( size.y, 1e-3 ) / 2, Math.max( size.z, 1e-3 ) / 2,
+		) );
+
+	}
+
+	// Returns { boundBodies, kinematicBodies } — lists the fixed-step loop syncs
+	// each direction. Assumes labeled nodes are direct, untransformed children of
+	// the scene root (true of every bundled example) — a nested-parent scene
+	// would need a world->local conversion this harness intentionally omits.
+	function applyPhysicsLabels( $S, CANNON, world, bindBody ) {
+
+		const kinematicBodies = [];
+
+		for ( const node of $S( '.static' ).toArray() ) {
+
+			const body = new CANNON.Body( { mass: 0, shape: shapeFor( CANNON, node ) } );
+			body.position.set( node.position.x, node.position.y, node.position.z );
+			body.quaternion.set( node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w );
+			world.addBody( body );
+
+		}
+
+		for ( const node of $S( '.trigger' ).toArray() ) {
+
+			const body = new CANNON.Body( { mass: 0, shape: shapeFor( CANNON, node ), isTrigger: true, collisionResponse: false } );
+			body.position.set( node.position.x, node.position.y, node.position.z );
+			world.addBody( body );
+			node.userData.physicsBody = body; // a game reads overlap itself via body.aabb / collide events
+
+		}
+
+		for ( const node of $S( '.dynamic' ).toArray() ) {
+
+			const body = new CANNON.Body( { mass: 1, shape: shapeFor( CANNON, node ) } );
+			body.position.set( node.position.x, node.position.y, node.position.z );
+
+			// §5 tunneling guard: fast/small dynamic bodies (e.g. a ball) opt in
+			// via extras.ccd — cannon-es CCD is weaker than a native engine's;
+			// that ceiling belongs in the "not native parity" ledger, not hidden.
+			if ( node.userData && node.userData.ccd ) {
+
+				const shape = body.shapes[ 0 ];
+				body.ccdSpeedThreshold = 0.2;
+				body.ccdSweptSphereRadius = shape.radius || 0.2;
+
+			}
+
+			world.addBody( body );
+			bindBody( node, body );
+
+		}
+
+		for ( const node of $S( '.kinematic' ).toArray() ) {
+
+			const CANNON_KINEMATIC = CANNON.Body.KINEMATIC;
+			const body = new CANNON.Body( { mass: 0, type: CANNON_KINEMATIC, shape: shapeFor( CANNON, node ) } );
+			body.position.set( node.position.x, node.position.y, node.position.z );
+			world.addBody( body );
+			kinematicBodies.push( { object3d: node, body } );
+
+		}
+
+		return kinematicBodies;
+
+	}
+
+	// ── Boot ────────────────────────────────────────────────────────────────────
+	async function boot( { source, file } ) {
+
+		const canvas = document.createElement( 'canvas' );
+		document.body.appendChild( canvas );
+
+		const camera = new THREE.PerspectiveCamera( 50, innerWidth / innerHeight, 0.05, 1000 );
+
+		const renderer = new THREE.WebGLRenderer( { canvas, antialias: true } );
+		renderer.setPixelRatio( Math.min( devicePixelRatio || 1, 2 ) );
+		renderer.setSize( innerWidth, innerHeight );
+		renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+		window.addEventListener( 'resize', () => {
+
+			camera.aspect = innerWidth / innerHeight;
+			camera.updateProjectionMatrix();
+			renderer.setSize( innerWidth, innerHeight );
+
+		} );
+
+		const fetchBytes = makeAssetFetcher( source );
+
+		// The entry module's filename is never authored separately — a game repo
+		// is just two files: this scene's own .glb, and the SAME basename with a
+		// .js extension ("game.glb" -> "game.js"). No manifest at all.
+		const scenePath = file;
+		const entryPath = scenePath.replace( /\.glb$/i, '.js' );
+
+		const scene = await loadGLB( await fetchBytes( scenePath ) );
+
+		// Frame the camera from the loaded scene's OWN bounds — a scene's real
+		// scale is never known in advance (a tabletop prop scene and a room-scale
+		// scene can differ 10-100x), so a fixed hardcoded camera pose reliably
+		// ends up either embedded in geometry (rendering a single, point-blank,
+		// featureless polygon face) or lost in empty space depending on the
+		// game's own scale. A real entry.js is always free to move the camera
+		// itself afterward; this is just a sane, scale-correct starting point,
+		// and what the default orbit-view fallback below re-derives its own
+		// target from.
+		const bounds = new THREE.Box3().setFromObject( scene );
+		const boundsCenter = bounds.isEmpty() ? new THREE.Vector3( 0, 0.8, 0 ) : bounds.getCenter( new THREE.Vector3() );
+		const boundsRadius = bounds.isEmpty() ? 3 : ( bounds.getSize( new THREE.Vector3() ).length() / 2 || 3 );
+		camera.position.set( boundsCenter.x, boundsCenter.y + boundsRadius * 0.35, boundsCenter.z + boundsRadius * 1.6 );
+		camera.lookAt( boundsCenter );
+
+		applyExtrasAsClasses( scene );
+		autoLabel( scene );
+		const $S = createS( scene );
+
+		// Sensible default lighting so a game never has to supply its own just
+		// to see anything — the "look" is a runtime concern, not the game's.
+		scene.add( new THREE.AmbientLight( 0xffffff, 0.7 ) );
+		const sun = new THREE.DirectionalLight( 0xffffff, 1.3 );
+		sun.position.set( 3, 6, 4 );
+		scene.add( sun );
+
+		// Physics is never flagged in a manifest (there isn't one) — it's
+		// auto-detected from whether the scene's own labels (§4 vocabulary) ask
+		// for any at all. A scene with none of these classes never pays for
+		// cannon-es.
+		const needsPhysics = [ 'static', 'dynamic', 'kinematic', 'trigger' ].some( ( c ) => $S( '.' + c ).exists );
+
+		let world = null;
+		let CANNON = null;
+		const boundBodies = []; // dynamic: body -> object3d, synced after each fixed step
+		let kinematicBodies = []; // kinematic: object3d -> body, synced before each fixed step
+
+		function bindBody( selectorOrObject, body ) {
+
+			const node = typeof selectorOrObject === 'string' ? $S( selectorOrObject ).toArray()[ 0 ] : selectorOrObject;
+			if ( ! node || ! body ) return;
+			boundBodies.push( { object3d: node, body } );
+
+		}
+
+		if ( needsPhysics ) {
+
+			CANNON = await import( 'cannon-es' );
+			world = new CANNON.World( { gravity: new CANNON.Vec3( 0, - 9.82, 0 ) } );
+			// Lively-by-default contact response (low friction, near-elastic) —
+			// a reasonable harness default for arcade-style games; a game that
+			// wants different behavior sets its own body.material/ContactMaterial
+			// via the exposed `world` directly.
+			world.defaultContactMaterial.friction = 0;
+			world.defaultContactMaterial.restitution = 1;
+			kinematicBodies = applyPhysicsLabels( $S, CANNON, world, bindBody );
+
+		}
+
+		const frameCallbacks = [];
+		const resetHandlers = [];
+		const input = makeInput( canvas, camera );
+
+		const ctx = {
+			THREE,
+			scene,
+			$S,
+			camera,
+			renderer,
+			canvas,
+			world,
+			input,
+			// Raycaster helper (§3): pointer -> labeled object pick, already
+			// wrapped as a $S set so the result chains straight into ops.
+			pick: ( selectorOrArray ) => {
+
+				const ray = input.pointerRay();
+				if ( ! ray ) return $S( [] );
+				const candidates = typeof selectorOrArray === 'string' ? $S( selectorOrArray ).toArray() : ( selectorOrArray || $S( '*' ).toArray() );
+				const hits = ray.intersectObjects( candidates, false );
+				return $S( hits.map( ( h ) => h.object ) );
+
+			},
+			bindBody,
+			// bindBody's read-side counterpart — a game (e.g. Pong) needs the
+			// raw cannon-es Body for a labeled node (to set velocity on serve,
+			// read it for a HUD, etc.); looks up either sync list.
+			getBody: ( selectorOrObject ) => {
+
+				const node = typeof selectorOrObject === 'string' ? $S( selectorOrObject ).toArray()[ 0 ] : selectorOrObject;
+				if ( ! node ) return null;
+				const hit = boundBodies.find( ( b ) => b.object3d === node ) || kinematicBodies.find( ( b ) => b.object3d === node );
+				return hit ? hit.body : null;
+
+			},
+			onFrame: ( fn ) => frameCallbacks.push( fn ),
+			onReset: ( fn ) => resetHandlers.push( fn ),
+			reset: () => { for ( const fn of resetHandlers ) { try { fn(); } catch ( e ) { console.error( e ); } } },
+			state: {},
+		};
+
+		// Debug console surface, same spirit as strata-editor's JS Shell
+		// exposing $S over the authored scene — useful for hand-debugging a
+		// game in devtools and for this repo's own Playwright test, never
+		// used by the game itself.
+		window.$S = $S;
+		window.STRATA_CTX = ctx;
+
+		// A repo with a .glb but no matching .js is still viewable — fall back
+		// to a minimal orbit-view default (synthesized here, never written back
+		// to the repo) instead of hard-failing "no entry module". A real
+		// entry.js, once added, always wins — this only ever applies when
+		// fetching it failed.
+		const DEFAULT_ENTRY_SRC = `
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			export default function init( ctx ) {
+				const box = new ctx.THREE.Box3().setFromObject( ctx.scene );
+				const center = box.isEmpty() ? new ctx.THREE.Vector3( 0, 0.8, 0 ) : box.getCenter( new ctx.THREE.Vector3() );
+				const controls = new OrbitControls( ctx.camera, ctx.canvas );
+				controls.target.copy( center );
+				controls.update();
+				ctx.onFrame( () => controls.update() );
+			}
+		`;
+
+		let entryText;
+		try { entryText = new TextDecoder( 'utf-8' ).decode( await fetchBytes( entryPath ) ); }
+		catch ( e ) {
+
+			console.warn( `strata-play: no entry module at "${ entryPath }" (${ e.message }) — using the default orbit-view.` );
+			entryText = DEFAULT_ENTRY_SRC;
+
+		}
+
+		// raw.githubusercontent.com serves .js as text/plain, which browsers
+		// refuse as a module's response Content-Type — fetching the bytes
+		// ourselves and importing a Blob URL sidesteps that regardless of
+		// which CDN served them (or, for the local example, that there was no
+		// fetch at all).
+		const blobUrl = URL.createObjectURL( new Blob( [ entryText ], { type: 'text/javascript' } ) );
+		let mod;
+		try { mod = await import( /* @vite-ignore */ blobUrl ); }
+		finally { URL.revokeObjectURL( blobUrl ); }
+
+		if ( typeof mod.default !== 'function' ) throw new Error( `${ entryPath }: default export must be a function init(ctx)` );
+
+		await mod.default( ctx );
+
+		// §5 physics honesty: a REAL fixed-timestep accumulator, not just
+		// cannon-es's own internal one — onFrame callbacks (and one physics
+		// step) always advance by exactly FIXED_DT regardless of the render
+		// framerate, so the same inputs produce the same result on a given
+		// pinned build (Playwright-repeatable). Rendering still happens once
+		// per rAF, decoupled from the logic rate.
+		const FIXED_DT = 1 / 60;
+		const MAX_CATCHUP_STEPS = 5; // drop catch-up work rather than spiral-of-death after a stall
+		let accumulator = 0;
+		let last = performance.now();
+
+		function loop( now ) {
+
+			const frameDt = Math.min( ( now - last ) / 1000, 0.25 );
+			last = now;
+			accumulator += frameDt;
+
+			let steps = 0;
+			while ( accumulator >= FIXED_DT && steps < MAX_CATCHUP_STEPS ) {
+
+				for ( const { object3d, body } of kinematicBodies ) {
+
+					body.position.set( object3d.position.x, object3d.position.y, object3d.position.z );
+					body.quaternion.set( object3d.quaternion.x, object3d.quaternion.y, object3d.quaternion.z, object3d.quaternion.w );
+
+				}
+
+				if ( world ) world.step( FIXED_DT, FIXED_DT, 1 ); // we ARE the accumulator now — no internal sub-stepping needed
+
+				for ( const { object3d, body } of boundBodies ) {
+
+					object3d.position.set( body.position.x, body.position.y, body.position.z );
+					object3d.quaternion.set( body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w );
+
+				}
+
+				for ( const fn of frameCallbacks ) { try { fn( FIXED_DT, now / 1000 ); } catch ( e ) { console.error( e ); } }
+
+				accumulator -= FIXED_DT;
+				steps ++;
+
+			}
+
+			if ( steps === MAX_CATCHUP_STEPS ) accumulator = 0;
+
+			renderer.render( scene, camera );
+			requestAnimationFrame( loop );
+
+		}
+
+		requestAnimationFrame( loop );
+
+		postToParent( { type: 'strata:loaded' } );
+
+	}
+
+	// ── Handshake ───────────────────────────────────────────────────────────────
+	let started = false;
+
+	window.addEventListener( 'message', ( event ) => {
+
+		const msg = event.data;
+		if ( ! msg || msg.type !== 'strata:init' || started ) return;
+		started = true;
+		boot( msg ).catch( reportError );
+
+	} );
+
+	postToParent( { type: 'strata:ready' } );
+
+	</script>
+</body>
+</html>

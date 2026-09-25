@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Strata Play</title>
+<style>
+	:root { color-scheme: dark; }
+	* { box-sizing: border-box; }
+	html, body { height: 100%; margin: 0; background: #0b0b0d; color: #e8e8ea; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+
+	.bar {
+		display: flex; align-items: center; gap: 8px;
+		padding: 8px 12px; background: #131317; border-bottom: 1px solid #232329;
+	}
+	.bar h1 { font-size: 13px; font-weight: 600; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.9; }
+	.bar button, .bar a.btn {
+		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea;
+		padding: 5px 10px; border-radius: 6px; font: inherit; cursor: pointer; text-decoration: none; white-space: nowrap;
+	}
+	.bar button:hover, .bar a.btn:hover { background: #232329; }
+	#status { font-size: 12px; opacity: 0.65; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+	.stage { position: relative; width: 100%; height: calc(100% - 41px); background: #000; }
+	.stage:fullscreen { height: 100%; }
+	#sandbox { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+
+	#load-overlay {
+		position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+		gap: 10px; background: rgba(10,10,12,0.85); pointer-events: none;
+	}
+	/* Author `display: flex` above otherwise always beats the UA [hidden] rule
+	   (cascade origin, not specificity, decides — normal author beats normal
+	   user-agent regardless of selector weight), so the `hidden` IDL/attribute
+	   set by play.js would silently do nothing without this override. */
+	#load-overlay[hidden] { display: none; }
+	#load-overlay .spinner {
+		width: 28px; height: 28px; border-radius: 50%; border: 3px solid #333; border-top-color: #6cf;
+		animation: spin 0.8s linear infinite;
+	}
+	@keyframes spin { to { transform: rotate(360deg); } }
+	#load-message { font-size: 12px; opacity: 0.75; }
+
+	#menu-overlay {
+		position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+		background: rgba(6,6,8,0.75);
+	}
+	#menu-overlay[hidden] { display: none; }
+	#menu-overlay .panel {
+		background: #17171b; border: 1px solid #2c2c33; border-radius: 10px; padding: 20px; width: 320px;
+		max-height: 86vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+	}
+	#menu-overlay h2 { margin: 0 0 14px; font-size: 14px; opacity: 0.9; }
+	#menu-overlay h3 { margin: 18px 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.55; }
+	#menu-overlay .option {
+		display: flex; align-items: center; justify-content: space-between; width: 100%; margin-bottom: 8px;
+		padding: 10px 12px; border-radius: 8px; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea;
+		font: inherit; cursor: pointer; text-align: left;
+	}
+	#menu-overlay .option:last-child { margin-bottom: 0; }
+	#menu-overlay .option:hover:not(:disabled) { background: #232329; }
+	#menu-overlay .option:disabled { opacity: 0.45; cursor: not-allowed; }
+	#menu-overlay .option .badge { font-size: 10px; opacity: 0.7; }
+	#menu-overlay hr { border: 0; border-top: 1px solid #232329; margin: 16px 0 0; }
+	#menu-overlay .field { margin-bottom: 8px; }
+	#menu-overlay .field p { margin: 0 0 8px; font-size: 11px; opacity: 0.6; }
+	#menu-overlay input[type=text], #menu-overlay input[type=password] {
+		width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid #2c2c33;
+		background: #0e0e11; color: #e8e8ea; font: inherit;
+	}
+	#menu-overlay label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.8; margin: 8px 0; }
+	#menu-overlay .row { display: flex; gap: 8px; }
+	#menu-overlay .row button { flex: 1; }
+</style>
+</head>
+<body>
+
+	<div class="bar">
+		<button id="menu-btn" title="Menu">Menu</button>
+		<h1 id="game-title">Strata Play</h1>
+		<span id="status"></span>
+		<a id="open-source-link" class="btn" href="#" target="_blank" rel="noopener noreferrer" hidden>Open source</a>
+		<button id="fork-btn" hidden>Fork</button>
+		<button id="restart-btn">Restart</button>
+		<button id="fullscreen-btn">Fullscreen</button>
+	</div>
+
+	<div class="stage">
+		<!--
+			The untrusted frame. sandbox="allow-scripts" WITHOUT "allow-same-origin"
+			is the whole security model: the game's code runs with an opaque
+			(unique, cross-origin) origin, so it can never read this page's
+			localStorage (where the GitHub token lives) or reach window.parent's
+			DOM. It talks to the host only through postMessage (see play.js).
+			No allow-forms, allow-popups, allow-top-navigation, etc — a game
+			cannot navigate the tab, open windows, or submit forms either.
+		-->
+		<iframe id="sandbox" sandbox="allow-scripts" title="Strata game"></iframe>
+
+		<div id="load-overlay">
+			<div class="spinner"></div>
+			<div id="load-message">Loading…</div>
+		</div>
+
+		<div id="menu-overlay" hidden>
+			<div class="panel">
+				<h2>Strata Play</h2>
+				<button id="menu-new" class="option">New</button>
+				<button id="menu-examples" class="option" disabled>Examples <span class="badge">coming soon</span></button>
+
+				<h3>Load from repo</h3>
+				<div class="field"><input id="menu-repo" type="text" placeholder="owner/repo" autocomplete="off"></div>
+				<div class="field"><input id="menu-commit" type="text" placeholder="branch / tag / commit (optional)" autocomplete="off"></div>
+				<div class="field"><input id="menu-file" type="text" placeholder="path/to/game.glb" value="game.glb" autocomplete="off"></div>
+				<label class="check"><input id="menu-present" type="checkbox"> present (jsDelivr-first, for sharing/embeds)</label>
+				<button id="menu-load" class="option" style="justify-content:center;">Load</button>
+
+				<h3>GitHub token (for Fork)</h3>
+				<p style="margin:0 0 8px;font-size:11px;opacity:0.6;">Stays in this page's own storage — never sent to the sandboxed game.</p>
+				<div class="field"><input id="menu-token" type="password" placeholder="ghp_…" autocomplete="off"></div>
+				<button id="menu-token-save" class="option" style="justify-content:center;">Save token</button>
+			</div>
+		</div>
+	</div>
+
+	<script type="module" src="play.js"></script>
+</body>
+</html>

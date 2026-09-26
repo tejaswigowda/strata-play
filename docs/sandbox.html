@@ -36,6 +36,11 @@
 	#strata-start-gate .ping { padding: 14px 22px; border: 1px solid rgba(255,255,255,0.4); border-radius: 999px;
 		background: rgba(0,0,0,0.35); animation: strata-gate-pulse 1.6s ease-in-out infinite; }
 	@keyframes strata-gate-pulse { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
+	#strata-pause-overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+		background: rgba(0,0,0,0.55); color: #fff; font: 600 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+		letter-spacing: 0.02em; -webkit-user-select: none; user-select: none; pointer-events: none; }
+	#strata-pause-overlay[hidden] { display: none; }
+	#strata-pause-overlay .ping { padding: 14px 22px; border: 1px solid rgba(255,255,255,0.4); border-radius: 999px; background: rgba(0,0,0,0.35); }
 </style>
 <!--
 	Pinned runtime stack — covenant #2 ("outlasts the engine" needs frozen
@@ -708,6 +713,34 @@
 		renderer.xr.getController( 0 ).addEventListener( 'selectstart', openGate );
 		renderer.xr.getController( 1 ).addEventListener( 'selectstart', openGate );
 
+		// ── Pause on lost focus (strata-play standard, every game, never
+		// per-game code): switching tabs/apps, or clicking back into the
+		// host's own chrome (e.g. its Menu), stops onFrame/physics the same
+		// way the click-to-play gate does — a game left running unattended
+		// in a background tab never silently racks up AI/physics/score the
+		// player didn't see. Rendering keeps happening so the tab thumbnail/
+		// alt-tab preview still shows the scene. Skipped entirely while
+		// presenting in an XR session — a headset's compositor can blur the
+		// 2D tab even though the player is actively still in VR/AR.
+		const pauseOverlay = document.createElement( 'div' );
+		pauseOverlay.id = 'strata-pause-overlay';
+		pauseOverlay.innerHTML = '<div class="ping">Paused</div>';
+		pauseOverlay.hidden = true;
+		document.body.appendChild( pauseOverlay );
+
+		let paused = false;
+		function setPaused( next ) {
+
+			if ( renderer.xr.isPresenting || next === paused ) return;
+			paused = next;
+			pauseOverlay.hidden = ! ( paused && gateOpen );
+
+		}
+
+		window.addEventListener( 'blur', () => setPaused( true ) );
+		window.addEventListener( 'focus', () => setPaused( false ) );
+		document.addEventListener( 'visibilitychange', () => setPaused( document.hidden ) );
+
 		// §5 physics honesty: a REAL fixed-timestep accumulator, not just
 		// cannon-es's own internal one — onFrame callbacks (and one physics
 		// step) always advance by exactly FIXED_DT regardless of the render
@@ -724,7 +757,7 @@
 			const frameDt = Math.min( ( now - last ) / 1000, 0.25 );
 			last = now;
 
-			if ( gateOpen ) {
+			if ( gateOpen && ! paused ) {
 
 				accumulator += frameDt;
 

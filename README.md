@@ -116,7 +116,8 @@ no framework. Picking uses `ctx.input.pointerRay()` + three's `Raycaster`
 Two origins, one boundary:
 
 - **Host shell** (`docs/index.html` + `docs/play.js`) — trusted. Parses the hash, does
-  git reads + fork (a write), holds the GitHub token in its own
+  git reads + fork + an explicit, menu-driven commit (all writes; see
+  "Commit changes" below), holds the GitHub token in its own
   `localStorage`, renders the sandbox `<iframe>`.
 - **Sandbox** (`docs/sandbox.html`) — untrusted. Runs the pinned stack plus the
   game's own code, all inlined in this one file (no separate runtime.js — see
@@ -128,9 +129,9 @@ Two origins, one boundary:
   scene `.glb` path, never bytes, never the token); the
   sandbox sends `strata:ready` / `strata:loaded` / `strata:error` /
   `strata:fork-requested` / `strata:save` (host validates path-scope + a size
-  cap, then only ever acks — strata-play never commits during play; see
-  `validateSaveRequest` in `play.js`). Any other message type is ignored —
-  allowlist, not denylist.
+  cap, then only ever acks — **a game's own `strata:save` request is never
+  acted on, full stop**; see `validateSaveRequest` in `play.js`). Any other
+  message type is ignored — allowlist, not denylist.
 
 The token never enters the iframe, so a shared game link cannot exfiltrate it.
 `test/play.spec.mjs` verifies this directly: it sets a dummy value in the
@@ -240,6 +241,23 @@ game is loaded pre-fills the load form from what's currently playing. A bare
 visit (no `#repo=` hash at all) opens the menu automatically, on the Load-from-repo
 form, with a hint that no play repo is configured yet — the bundled example
 keeps running behind it either way, so the menu is a nudge, never a blocker.
+
+### Commit changes
+
+A loaded `#repo=` game also gets a **Commit changes** section in the menu —
+the only OTHER write path besides Fork, and completely separate from the
+sandbox's `strata:save` message above (that path is still, always, only ever
+acked — a game's own code cannot trigger this). This is a human sitting at
+the menu, with their own token, explicitly editing a path/content/message and
+clicking "Commit to branch": pre-filled from the loaded game's own entry
+module (`outputs/pong.glb` → `outputs/pong.js`), it fetches the file's
+current `sha` first (so an update never races a concurrent change into a
+rejected write) and commits straight to the loaded ref (a direct-to-branch
+commit, never a PR) via `docs/lib/git-host.js`'s `commitFile`. There is no
+diff view and no code editor beyond a plain textarea — this is the same raw
+capability the agent already used to push every example in this README's own
+dev loop, just exposed as a self-service menu action instead of an ad hoc
+script.
 
 ## Dev / verify loop
 

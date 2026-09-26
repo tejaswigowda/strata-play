@@ -19,8 +19,8 @@
 // window.parent's DOM. postMessage is the only channel, and this file only
 // ever sends { source, file } into it.
 
-import { splitRepoRef } from './lib/git-resolver.js';
-import { parseRepo, loadSettings, saveSettings, forkRepo } from './lib/git-host.js';
+import { splitRepoRef, resolveAssetBytes } from './lib/git-resolver.js';
+import { parseRepo, loadSettings, saveSettings, forkRepo, commitFile } from './lib/git-host.js';
 
 const DEFAULT_EXAMPLE = 'hello';
 
@@ -40,6 +40,7 @@ const els = {
 	openSourceLink: document.getElementById( 'open-source-link' ),
 	menuBtn: document.getElementById( 'menu-btn' ),
 	menuOverlay: document.getElementById( 'menu-overlay' ),
+	menuCloseBtn: document.getElementById( 'menu-close-btn' ),
 	menuNewBtn: document.getElementById( 'menu-new' ),
 	menuExamplesBtn: document.getElementById( 'menu-examples' ),
 	menuLoadHint: document.getElementById( 'menu-load-hint' ),
@@ -50,6 +51,16 @@ const els = {
 	menuLoadBtn: document.getElementById( 'menu-load' ),
 	menuTokenInput: document.getElementById( 'menu-token' ),
 	menuTokenSaveBtn: document.getElementById( 'menu-token-save' ),
+	menuCommitHeading: document.getElementById( 'menu-commit-heading' ),
+	menuCommitHint: document.getElementById( 'menu-commit-hint' ),
+	menuCommitTarget: document.getElementById( 'menu-commit-target' ),
+	menuCommitPathField: document.getElementById( 'menu-commit-path-field' ),
+	menuCommitContentField: document.getElementById( 'menu-commit-content-field' ),
+	menuCommitMessageField: document.getElementById( 'menu-commit-message-field' ),
+	menuCommitBtn: document.getElementById( 'menu-commit-btn' ),
+	menuCommitPathInput: document.getElementById( 'menu-commit-path' ),
+	menuCommitContentInput: document.getElementById( 'menu-commit-content' ),
+	menuCommitMessageInput: document.getElementById( 'menu-commit-message' ),
 };
 
 let current = null; // { source, dir, file, title }
@@ -318,6 +329,8 @@ function openMenu( hint ) {
 	els.menuLoadHint.textContent = hint || '';
 	els.menuLoadHint.hidden = ! hint;
 
+	populateCommitSection();
+
 	els.menuOverlay.hidden = false;
 
 }
@@ -408,6 +421,80 @@ async function forkAndReload() {
 
 }
 
+// ── Commit changes ──────────────────────────────────────────────────────────────
+// A deliberate, EXPLICIT, user-initiated write from this trusted host UI —
+// unrelated to the sandbox's own `strata:save` postMessage path below, which
+// this file still only ever acks and never acts on (see validateSaveRequest).
+// A game's own code still cannot get anything committed; only a person
+// looking at this menu, with their own token, can.
+
+let commitEntryLoaded = false; // avoid re-fetching the entry's content every time the menu re-opens
+
+async function populateCommitSection() {
+
+	const isGit = !! ( current && current.source.kind === 'git' );
+	els.menuCommitHeading.hidden = ! isGit;
+	els.menuCommitHint.hidden = ! isGit;
+	els.menuCommitPathField.hidden = ! isGit;
+	els.menuCommitContentField.hidden = ! isGit;
+	els.menuCommitMessageField.hidden = ! isGit;
+	els.menuCommitBtn.hidden = ! isGit;
+
+	if ( ! isGit ) return;
+
+	const { owner, repo, ref, mode } = current.source;
+	const branch = ref || 'main'; // best-effort — see git-host.js's commitFile comment
+	els.menuCommitTarget.textContent = `${ owner }/${ repo }@${ branch }`;
+
+	if ( commitEntryLoaded ) return; // don't clobber in-progress edits on a later menu re-open
+	commitEntryLoaded = true;
+
+	const entryPath = current.file.replace( /\.glb$/i, '.js' );
+	els.menuCommitPathInput.value = entryPath;
+	els.menuCommitMessageInput.value = `Update ${ entryPath }`;
+
+	try {
+
+		const bytes = await resolveAssetBytes( { owner, repo, ref, path: entryPath, mode } );
+		els.menuCommitContentInput.value = new TextDecoder( 'utf-8' ).decode( bytes );
+
+	} catch {
+
+		els.menuCommitContentInput.value = ''; // no entry module yet — a blank start is fine, this is a text editor, not a diff tool
+
+	}
+
+}
+
+async function commitChanges() {
+
+	if ( ! current || current.source.kind !== 'git' ) return;
+
+	const token = tokenOrPrompt();
+	if ( ! token ) return; // menu now open on the token field; user retries after saving
+
+	const path = els.menuCommitPathInput.value.trim();
+	const content = els.menuCommitContentInput.value;
+	const message = els.menuCommitMessageInput.value.trim() || `Update ${ path }`;
+	if ( ! path ) { els.menuCommitPathInput.focus(); return; }
+
+	const { owner, repo, ref } = current.source;
+	const branch = ref || 'main';
+	setStatus( `Committing ${ path } to ${ owner }/${ repo }@${ branch }…` );
+
+	try {
+
+		await commitFile( owner, repo, path, content, message, branch, token );
+		setStatus( `✓ Committed ${ path }` );
+
+	} catch ( err ) {
+
+		setStatus( `Commit failed: ${ err.message }` );
+
+	}
+
+}
+
 // ── Wire up chrome ────────────────────────────────────────────────────────────
 
 els.restartBtn.addEventListener( 'click', restart );
@@ -435,8 +522,11 @@ els.menuTokenSaveBtn.addEventListener( 'click', () => {
 
 } );
 
-els.menuBtn.addEventListener( 'click', openMenu );
+els.menuCommitBtn.addEventListener( 'click', commitChanges );
+
+els.menuBtn.addEventListener( 'click', () => openMenu() ); // NOT `openMenu` directly — the click's own PointerEvent would leak in as `hint`
 els.menuNewBtn.addEventListener( 'click', startNew );
+els.menuCloseBtn.addEventListener( 'click', closeMenu );
 
 els.menuOverlay.addEventListener( 'click', ( ev ) => {
 

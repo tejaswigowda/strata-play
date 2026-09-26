@@ -53,7 +53,14 @@ function ghHeaders( token, accept ) {
 async function ghGet( path, token ) {
 
 	const res = await fetch( `https://api.github.com${ path }`, { headers: ghHeaders( token ), cache: 'no-store' } );
-	if ( ! res.ok ) throw new Error( `GitHub ${ res.status }: ${ await res.text() }` );
+	if ( ! res.ok ) {
+
+		const err = new Error( `GitHub ${ res.status }: ${ await res.text() }` );
+		err.status = res.status;
+		throw err;
+
+	}
+
 	return res.json();
 
 }
@@ -110,5 +117,53 @@ export async function forkRepo( owner, repo, token ) {
 		full_name: fork.full_name,
 		default_branch: fork.default_branch || 'main',
 	};
+
+}
+
+// ── Path helper (same rule as git-resolver.js's encodePath) ────────────────
+function encodePath( path ) {
+
+	return path.split( '/' ).map( encodeURIComponent ).join( '/' );
+
+}
+
+/**
+ * Commit a single text file's new content to `owner/repo` on `ref` (a branch
+ * name — a direct-to-branch commit, never a PR; the caller decides whether
+ * that's appropriate for the loaded repo). This is a deliberate, EXPLICIT,
+ * user-initiated write from the trusted host UI (the menu's own "Commit
+ * changes" form) — unrelated to, and no change to, the sandbox's own
+ * `strata:save` postMessage path, which the host still only ever acks and
+ * never acts on (see play.js's validateSaveRequest / the README's security
+ * architecture) — a game's own code still cannot get anything committed.
+ *
+ * Looks up the file's current `sha` first (a 404 just means "new file", not
+ * an error) so an update never clobbers a concurrent change — GitHub itself
+ * enforces the sha match on write, this only supplies it. Returns the new
+ * blob's `{ sha, html_url }` (mirrors the Contents API's own response shape).
+ */
+export async function commitFile( owner, repo, path, content, message, ref, token ) {
+
+	if ( ! token ) throw new Error( 'A token is required to commit' );
+
+	const encodedPath = encodePath( path );
+	let sha;
+	try {
+
+		const existing = await ghGet( `/repos/${ owner }/${ repo }/contents/${ encodedPath }?ref=${ encodeURIComponent( ref ) }`, token );
+		sha = existing.sha;
+
+	} catch ( e ) {
+
+		if ( e.status !== 404 ) throw e; // anything other than "doesn't exist yet" is a real failure
+
+	}
+
+	const body = { message, content: btoa( unescape( encodeURIComponent( content ) ) ), branch: ref };
+	if ( sha ) body.sha = sha;
+
+	const result = await ghSend( 'PUT', `/repos/${ owner }/${ repo }/contents/${ encodedPath }`, token, body );
+
+	return { sha: result.content.sha, html_url: result.content.html_url };
 
 }

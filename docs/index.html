@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Strata Play</title>
+<!-- Icon font only — CDN, pinned version (never @latest), matches this repo's
+     own "exact versions, no build step" convention for every other CDN dep. -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 <style>
 	:root { color-scheme: dark; }
 	* { box-sizing: border-box; }
@@ -17,6 +20,7 @@
 	.bar button, .bar a.btn {
 		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea;
 		padding: 5px 10px; border-radius: 6px; font: inherit; cursor: pointer; text-decoration: none; white-space: nowrap;
+		display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
 	}
 	.bar button:hover, .bar a.btn:hover { background: #232329; }
 	#status { font-size: 12px; opacity: 0.65; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -51,6 +55,13 @@
 		max-height: 86vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 	}
 	#menu-overlay h2 { margin: 0 0 14px; font-size: 14px; opacity: 0.9; }
+	#menu-overlay .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+	#menu-overlay .panel-header h2 { margin: 0; }
+	#menu-close-btn {
+		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea; border-radius: 6px;
+		width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 12px;
+	}
+	#menu-close-btn:hover { background: #232329; }
 	#menu-overlay h3 { margin: 18px 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.55; }
 	#menu-overlay .option {
 		display: flex; align-items: center; justify-content: space-between; width: 100%; margin-bottom: 8px;
@@ -68,6 +79,10 @@
 		width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid #2c2c33;
 		background: #0e0e11; color: #e8e8ea; font: inherit;
 	}
+	#menu-overlay textarea {
+		width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid #2c2c33;
+		background: #0e0e11; color: #e8e8ea; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical;
+	}
 	#menu-overlay label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.8; margin: 8px 0; }
 	#menu-overlay .row { display: flex; gap: 8px; }
 	#menu-overlay .row button { flex: 1; }
@@ -79,13 +94,13 @@
 <body>
 
 	<div class="bar">
-		<button id="menu-btn" title="Menu">Menu</button>
+		<button id="menu-btn" title="Menu" aria-label="Menu"><i class="fa-solid fa-bars"></i></button>
 		<h1 id="game-title">Strata Play</h1>
 		<span id="status"></span>
-		<a id="open-source-link" class="btn" href="#" target="_blank" rel="noopener noreferrer" hidden>Open source</a>
-		<button id="fork-btn" hidden>Fork</button>
-		<button id="restart-btn">Restart</button>
-		<button id="fullscreen-btn">Fullscreen</button>
+		<a id="open-source-link" class="btn" href="#" target="_blank" rel="noopener noreferrer" title="Open source" aria-label="Open source" hidden><i class="fa-brands fa-github"></i></a>
+		<button id="fork-btn" title="Fork" aria-label="Fork" hidden><i class="fa-solid fa-code-branch"></i></button>
+		<button id="restart-btn" title="Restart" aria-label="Restart"><i class="fa-solid fa-arrow-rotate-right"></i></button>
+		<button id="fullscreen-btn" title="Fullscreen" aria-label="Fullscreen"><i class="fa-solid fa-expand"></i></button>
 	</div>
 
 	<div class="stage">
@@ -107,7 +122,10 @@
 
 		<div id="menu-overlay" hidden>
 			<div class="panel">
-				<h2>Strata Play</h2>
+				<div class="panel-header">
+					<h2>Strata Play</h2>
+					<button id="menu-close-btn" title="Close" aria-label="Close menu"><i class="fa-solid fa-xmark"></i></button>
+				</div>
 				<button id="menu-new" class="option">New</button>
 				<button id="menu-examples" class="option" disabled>Examples <span class="badge">coming soon</span></button>
 
@@ -119,10 +137,17 @@
 				<label class="check"><input id="menu-present" type="checkbox"> present (jsDelivr-first, for sharing/embeds)</label>
 				<button id="menu-load" class="option" style="justify-content:center;">Load</button>
 
-				<h3>GitHub token (for Fork)</h3>
+				<h3>GitHub token (for Fork / Commit)</h3>
 				<p style="margin:0 0 8px;font-size:11px;opacity:0.6;">Stays in this page's own storage — never sent to the sandboxed game.</p>
 				<div class="field"><input id="menu-token" type="password" placeholder="ghp_…" autocomplete="off"></div>
 				<button id="menu-token-save" class="option" style="justify-content:center;">Save token</button>
+
+				<h3 id="menu-commit-heading" hidden>Commit changes</h3>
+				<p id="menu-commit-hint" hidden style="margin:0 0 8px;font-size:11px;opacity:0.6;">Pushes straight to <code id="menu-commit-target"></code> — no PR, no preview. Needs a token above.</p>
+				<div class="field" id="menu-commit-path-field" hidden><input id="menu-commit-path" type="text" placeholder="path/to/file" autocomplete="off"></div>
+				<div class="field" id="menu-commit-content-field" hidden><textarea id="menu-commit-content" rows="8" placeholder="file contents"></textarea></div>
+				<div class="field" id="menu-commit-message-field" hidden><input id="menu-commit-message" type="text" placeholder="commit message" autocomplete="off"></div>
+				<button id="menu-commit-btn" class="option" style="justify-content:center;" hidden>Commit to branch</button>
 			</div>
 		</div>
 	</div>

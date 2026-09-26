@@ -41,6 +41,8 @@ const els = {
 	menuBtn: document.getElementById( 'menu-btn' ),
 	menuOverlay: document.getElementById( 'menu-overlay' ),
 	menuCloseBtn: document.getElementById( 'menu-close-btn' ),
+	menuTabBtns: Array.from( document.querySelectorAll( '#menu-tabs button' ) ),
+	menuTabPanels: Array.from( document.querySelectorAll( '.tab-panel' ) ),
 	menuNewBtn: document.getElementById( 'menu-new' ),
 	menuExamplesBtn: document.getElementById( 'menu-examples' ),
 	menuLoadHint: document.getElementById( 'menu-load-hint' ),
@@ -55,15 +57,20 @@ const els = {
 	menuCommitHint: document.getElementById( 'menu-commit-hint' ),
 	menuCommitTarget: document.getElementById( 'menu-commit-target' ),
 	menuCommitPathField: document.getElementById( 'menu-commit-path-field' ),
-	menuCommitContentField: document.getElementById( 'menu-commit-content-field' ),
 	menuCommitMessageField: document.getElementById( 'menu-commit-message-field' ),
 	menuCommitBtn: document.getElementById( 'menu-commit-btn' ),
 	menuCommitPathInput: document.getElementById( 'menu-commit-path' ),
-	menuCommitContentInput: document.getElementById( 'menu-commit-content' ),
 	menuCommitMessageInput: document.getElementById( 'menu-commit-message' ),
+	menuCodeEmpty: document.getElementById( 'menu-code-empty' ),
+	menuCodeStatus: document.getElementById( 'menu-code-status' ),
+	menuCodeEditor: document.getElementById( 'menu-code-editor' ),
+	menuCodeTextarea: document.getElementById( 'menu-code-textarea' ),
+	menuCodeActions: document.getElementById( 'menu-code-actions' ),
+	menuCodeCancelBtn: document.getElementById( 'menu-code-cancel-btn' ),
+	menuCodeSaveBtn: document.getElementById( 'menu-code-save-btn' ),
 };
 
-let current = null; // { source, dir, file, title }
+let current = null; // { source, dir, file, title, entryOverride }
 let pendingForkAfterToken = false; // set when Fork opened the menu to collect a missing token
 
 // ── Hash parsing ───────────────────────────────────────────────────────────
@@ -261,6 +268,7 @@ function bootSandbox( loaded ) {
 				type: 'strata:init',
 				source: loaded.source,
 				file: loaded.file,
+				entryOverride: loaded.entryOverride, // set by the menu's Code-tab Save action; undefined otherwise (fetch as normal)
 			}, '*' );
 
 		} else if ( msg.type === 'strata:loaded' ) {
@@ -329,7 +337,7 @@ function openMenu( hint ) {
 	els.menuLoadHint.textContent = hint || '';
 	els.menuLoadHint.hidden = ! hint;
 
-	populateCommitSection();
+	populateCodeAndCommitSection();
 
 	els.menuOverlay.hidden = false;
 
@@ -421,24 +429,64 @@ async function forkAndReload() {
 
 }
 
-// ── Commit changes ──────────────────────────────────────────────────────────────
-// A deliberate, EXPLICIT, user-initiated write from this trusted host UI —
-// unrelated to the sandbox's own `strata:save` postMessage path below, which
-// this file still only ever acks and never acts on (see validateSaveRequest).
-// A game's own code still cannot get anything committed; only a person
-// looking at this menu, with their own token, can.
+// ── Code + Commit ─────────────────────────────────────────────────────────────
+// The Code tab's editor is the single source of truth for "what should this
+// game's entry module contain" — Save (hot-)reloads the SANDBOXED game from
+// its current text (never committed by that alone); Commit is a fully
+// separate, explicit action that pushes that same text to GitHub. Neither one
+// is the sandbox's own `strata:save` postMessage path below, which this file
+// still only ever acks and never acts on (see validateSaveRequest) — a game's
+// own code still cannot get anything committed; only a person at this menu,
+// with their own token, can.
 
-let commitEntryLoaded = false; // avoid re-fetching the entry's content every time the menu re-opens
+let codeMirror = null;
+let lastSyncedSource = null; // what the RUNNING game currently reflects (null until a repo is loaded)
+let codeEntryLoaded = false; // avoid re-fetching the entry's content every time the menu re-opens
 
-async function populateCommitSection() {
+function ensureCodeMirror() {
+
+	if ( codeMirror ) return codeMirror;
+
+	codeMirror = CodeMirror.fromTextArea( els.menuCodeTextarea, {
+		mode: 'javascript',
+		theme: 'dracula',
+		lineNumbers: true,
+		matchBrackets: true,
+		indentUnit: 2,
+		tabSize: 2,
+	} );
+
+	codeMirror.on( 'change', updateCodeStatus );
+
+	return codeMirror;
+
+}
+
+function updateCodeStatus() {
+
+	if ( lastSyncedSource === null ) { els.menuCodeStatus.hidden = true; return; }
+
+	const dirty = codeMirror.getValue() !== lastSyncedSource;
+	els.menuCodeStatus.hidden = false;
+	els.menuCodeStatus.textContent = dirty
+		? 'Unsaved changes — Save to sync with the running game'
+		: 'Synced with the running game';
+	els.menuCodeStatus.classList.toggle( 'dirty', dirty );
+	els.menuCodeStatus.classList.toggle( 'synced', ! dirty );
+
+}
+
+async function populateCodeAndCommitSection() {
 
 	const isGit = !! ( current && current.source.kind === 'git' );
 	els.menuCommitHeading.hidden = ! isGit;
 	els.menuCommitHint.hidden = ! isGit;
 	els.menuCommitPathField.hidden = ! isGit;
-	els.menuCommitContentField.hidden = ! isGit;
 	els.menuCommitMessageField.hidden = ! isGit;
 	els.menuCommitBtn.hidden = ! isGit;
+	els.menuCodeEmpty.hidden = isGit;
+	els.menuCodeEditor.hidden = ! isGit;
+	els.menuCodeActions.hidden = ! isGit;
 
 	if ( ! isGit ) return;
 
@@ -446,35 +494,58 @@ async function populateCommitSection() {
 	const branch = ref || 'main'; // best-effort — see git-host.js's commitFile comment
 	els.menuCommitTarget.textContent = `${ owner }/${ repo }@${ branch }`;
 
-	if ( commitEntryLoaded ) return; // don't clobber in-progress edits on a later menu re-open
-	commitEntryLoaded = true;
+	if ( codeEntryLoaded ) return; // don't clobber in-progress edits on a later menu re-open
+	codeEntryLoaded = true;
 
 	const entryPath = current.file.replace( /\.glb$/i, '.js' );
 	els.menuCommitPathInput.value = entryPath;
 	els.menuCommitMessageInput.value = `Update ${ entryPath }`;
 
+	let source;
 	try {
 
 		const bytes = await resolveAssetBytes( { owner, repo, ref, path: entryPath, mode } );
-		els.menuCommitContentInput.value = new TextDecoder( 'utf-8' ).decode( bytes );
+		source = new TextDecoder( 'utf-8' ).decode( bytes );
 
 	} catch {
 
-		els.menuCommitContentInput.value = ''; // no entry module yet — a blank start is fine, this is a text editor, not a diff tool
+		source = ''; // no entry module yet — a blank start is fine, this is a text editor, not a diff tool
 
 	}
+
+	ensureCodeMirror().setValue( current.entryOverride ?? source );
+	lastSyncedSource = current.entryOverride ?? source;
+	updateCodeStatus();
+
+}
+
+function saveCode() {
+
+	if ( ! codeMirror ) return;
+	current.entryOverride = codeMirror.getValue();
+	lastSyncedSource = current.entryOverride;
+	updateCodeStatus();
+	restart();
+
+}
+
+function cancelCode() {
+
+	if ( ! codeMirror || lastSyncedSource === null ) return;
+	codeMirror.setValue( lastSyncedSource );
+	updateCodeStatus();
 
 }
 
 async function commitChanges() {
 
-	if ( ! current || current.source.kind !== 'git' ) return;
+	if ( ! current || current.source.kind !== 'git' || ! codeMirror ) return;
 
 	const token = tokenOrPrompt();
 	if ( ! token ) return; // menu now open on the token field; user retries after saving
 
 	const path = els.menuCommitPathInput.value.trim();
-	const content = els.menuCommitContentInput.value;
+	const content = codeMirror.getValue();
 	const message = els.menuCommitMessageInput.value.trim() || `Update ${ path }`;
 	if ( ! path ) { els.menuCommitPathInput.focus(); return; }
 
@@ -485,7 +556,7 @@ async function commitChanges() {
 	try {
 
 		await commitFile( owner, repo, path, content, message, branch, token );
-		setStatus( `✓ Committed ${ path }` );
+		setStatus( `✓ Committed ${ path } to ${ owner }/${ repo }@${ branch }` );
 
 	} catch ( err ) {
 
@@ -494,6 +565,19 @@ async function commitChanges() {
 	}
 
 }
+
+// ── Tabs ───────────────────────────────────────────────────────────────────────
+
+function switchTab( name ) {
+
+	for ( const btn of els.menuTabBtns ) btn.classList.toggle( 'active', btn.dataset.tab === name );
+	for ( const panel of els.menuTabPanels ) panel.hidden = panel.dataset.tabPanel !== name;
+
+	if ( name === 'code' && codeMirror ) codeMirror.refresh(); // was sized while hidden (0×0) — fix it up now that it's visible
+
+}
+
+for ( const btn of els.menuTabBtns ) btn.addEventListener( 'click', () => switchTab( btn.dataset.tab ) );
 
 // ── Wire up chrome ────────────────────────────────────────────────────────────
 
@@ -523,6 +607,8 @@ els.menuTokenSaveBtn.addEventListener( 'click', () => {
 } );
 
 els.menuCommitBtn.addEventListener( 'click', commitChanges );
+els.menuCodeSaveBtn.addEventListener( 'click', saveCode );
+els.menuCodeCancelBtn.addEventListener( 'click', cancelCode );
 
 els.menuBtn.addEventListener( 'click', () => openMenu() ); // NOT `openMenu` directly — the click's own PointerEvent would leak in as `hint`
 els.menuNewBtn.addEventListener( 'click', startNew );

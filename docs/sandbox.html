@@ -473,7 +473,7 @@
 	}
 
 	// ── Boot ────────────────────────────────────────────────────────────────────
-	async function boot( { source, file } ) {
+	async function boot( { source, file, entryOverride } ) {
 
 		const canvas = document.createElement( 'canvas' );
 		// Focusable + proactively focused: a keydown only ever reaches THIS
@@ -659,11 +659,22 @@
 		`;
 
 		let entryText;
-		try { entryText = new TextDecoder( 'utf-8' ).decode( await fetchBytes( entryPath ) ); }
-		catch ( e ) {
+		if ( typeof entryOverride === 'string' ) {
 
-			console.warn( `strata-play: no entry module at "${ entryPath }" (${ e.message }) — using the default orbit-view.` );
-			entryText = DEFAULT_ENTRY_SRC;
+			// The menu's Code-tab Save action — hot-reload with THIS text instead
+			// of re-fetching, so the editor and the running game stay in sync
+			// without needing a commit first.
+			entryText = entryOverride;
+
+		} else {
+
+			try { entryText = new TextDecoder( 'utf-8' ).decode( await fetchBytes( entryPath ) ); }
+			catch ( e ) {
+
+				console.warn( `strata-play: no entry module at "${ entryPath }" (${ e.message }) — using the default orbit-view.` );
+				entryText = DEFAULT_ENTRY_SRC;
+
+			}
 
 		}
 

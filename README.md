@@ -228,36 +228,63 @@ normally.
 Chrome-light, by design: fullscreen, restart, a title, an "Open source" link,
 and a **Fork** button (clones the current repo to your account via the GitHub
 API — needs a token, entered once and kept only in the host's own
-`localStorage` — then reloads the shell against the fork). Nothing else: no
-visual trigger-wiring, no code editor. Authoring stays in the agent + VS Code
-+ the Strata scene editor.
+`localStorage` — then reloads the shell against the fork). All icons
+(Font Awesome, pinned CDN version), no text labels — this is chrome, not a
+toolbar. Authoring stays in the agent + VS Code + the Strata scene editor;
+the in-menu editor below is for quick, self-service tweaks to an already-
+authored game, not a replacement for that workflow.
 
-The **Menu** button (top-left) opens the one place all git controls live:
-"New" / "Examples" (disabled for now), a **Load from repo** form
-(`repo` / `commit` / `file` / `present`, building the exact `#repo=…` hash
-above and reloading), and the **GitHub token** field Fork also opens
-automatically the first time it needs one. Opening the menu while a `#repo=`
-game is loaded pre-fills the load form from what's currently playing. A bare
-visit (no `#repo=` hash at all) opens the menu automatically, on the Load-from-repo
-form, with a hint that no play repo is configured yet — the bundled example
-keeps running behind it either way, so the menu is a nudge, never a blocker.
+The **Menu** button (top-left) opens a tabbed panel — **Basics**, **Git**,
+**Code** — closable via the header's × or a backdrop click:
 
-### Commit changes
+- **Basics** — "New" / "Examples" (disabled for now), and the **Load from
+  repo** form (`repo` / `commit` / `file` / `present`, building the exact
+  `#repo=…` hash above and reloading). Opening the menu while a `#repo=` game
+  is loaded pre-fills this from what's currently playing. A bare visit (no
+  `#repo=` hash at all) opens the menu automatically, on this tab, with a hint
+  that no play repo is configured yet — the bundled example keeps running
+  behind it either way, so this is a nudge, never a blocker.
+- **Git** — the GitHub token field Fork also opens automatically the first
+  time it needs one, and (for a loaded `#repo=` game only) the **Commit
+  changes** controls: a target repo/branch readout, a path, a commit message,
+  and a "Commit to branch" button.
+- **Code** — a full CodeMirror 5 editor (pinned CDN, dark theme, JS mode +
+  bracket matching), pre-filled from the loaded game's own entry module
+  (`outputs/pong.glb` → `outputs/pong.js`). See "Code tab: Save vs. Commit"
+  below for what the two buttons actually do.
 
-A loaded `#repo=` game also gets a **Commit changes** section in the menu —
-the only OTHER write path besides Fork, and completely separate from the
-sandbox's `strata:save` message above (that path is still, always, only ever
-acked — a game's own code cannot trigger this). This is a human sitting at
-the menu, with their own token, explicitly editing a path/content/message and
-clicking "Commit to branch": pre-filled from the loaded game's own entry
-module (`outputs/pong.glb` → `outputs/pong.js`), it fetches the file's
-current `sha` first (so an update never races a concurrent change into a
-rejected write) and commits straight to the loaded ref (a direct-to-branch
-commit, never a PR) via `docs/lib/git-host.js`'s `commitFile`. There is no
-diff view and no code editor beyond a plain textarea — this is the same raw
-capability the agent already used to push every example in this README's own
-dev loop, just exposed as a self-service menu action instead of an ad hoc
-script.
+### Code tab: Save vs. Commit
+
+These are two independent actions, on purpose — editing code and publishing
+it are different decisions:
+
+- **Save** (Code tab) — hot-reloads the SANDBOXED game from the editor's
+  current text via a `entryOverride` passed through the existing `strata:init`
+  handshake (`docs/sandbox.html`'s `boot()` uses it directly instead of
+  fetching the entry module over the network — zero requests to the CDN for
+  that file). This is a live, local, in-session change only — nothing is sent
+  to GitHub, and reloading the page reverts to whatever's actually committed.
+  The status line above the editor reads "Synced with the running game" or
+  "Unsaved changes — Save to sync with the running game" accordingly.
+- **Cancel** (Code tab) — discards in-progress edits, reverting the editor
+  back to whatever the running game currently reflects (the last Save, or the
+  freshly-fetched entry module if there hasn't been one yet).
+- **Commit** (Git tab) — an entirely separate, EXPLICIT, user-initiated write:
+  takes the Code tab editor's CURRENT text (independent of whether it's been
+  Saved to the live game or not) and pushes it straight to the loaded repo's
+  branch via `docs/lib/git-host.js`'s `commitFile` (looks up the file's
+  current `sha` first, so a concurrent edit never gets silently clobbered —
+  GitHub enforces the sha match, this only supplies it). A direct-to-branch
+  commit, never a PR, never automatic — status messages ("Committing…",
+  "✓ Committed to owner/repo@branch", "Commit failed: …") land in the top
+  bar's status text, the same place Fork's own messages already do.
+
+None of this touches the sandbox's own `strata:save` postMessage path (work
+order §1.3/§1.5#5) — that request is still, always, only ever acked and never
+acted on (see `validateSaveRequest` in `play.js`); a game's own code still
+cannot get anything committed. Save/Cancel/Commit are host-menu actions a
+person takes deliberately, with their own token — a completely different,
+unrelated write path.
 
 ## Dev / verify loop
 

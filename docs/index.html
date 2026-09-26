@@ -7,6 +7,10 @@
 <!-- Icon font only — CDN, pinned version (never @latest), matches this repo's
      own "exact versions, no build step" convention for every other CDN dep. -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<!-- Code editor for the menu's Code tab — same CDN/pinned-version convention;
+     plain <script>/<link> (CodeMirror 5 predates ES modules), no build step. -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
 <style>
 	:root { color-scheme: dark; }
 	* { box-sizing: border-box; }
@@ -51,44 +55,66 @@
 	}
 	#menu-overlay[hidden] { display: none; }
 	#menu-overlay .panel {
-		background: #17171b; border: 1px solid #2c2c33; border-radius: 10px; padding: 20px; width: 320px;
-		max-height: 86vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+		background: #17171b; border: 1px solid #2c2c33; border-radius: 10px; padding: 20px; width: min(720px, 92vw);
+		height: min(640px, 86vh); box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+		display: flex; flex-direction: column;
 	}
 	#menu-overlay h2 { margin: 0 0 14px; font-size: 14px; opacity: 0.9; }
-	#menu-overlay .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+	#menu-overlay .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex: none; }
 	#menu-overlay .panel-header h2 { margin: 0; }
 	#menu-close-btn {
 		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea; border-radius: 6px;
 		width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 12px;
 	}
 	#menu-close-btn:hover { background: #232329; }
+
+	#menu-tabs { display: flex; gap: 4px; margin-bottom: 14px; flex: none; }
+	#menu-tabs button {
+		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea; opacity: 0.65;
+		padding: 7px 14px; border-radius: 7px; font: inherit; font-size: 12px; cursor: pointer;
+	}
+	#menu-tabs button:hover { opacity: 0.85; }
+	#menu-tabs button.active { opacity: 1; background: #232329; border-color: #3a3a44; }
+	.tab-panel { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+	.tab-panel[hidden] { display: none; }
+
 	#menu-overlay h3 { margin: 18px 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.55; }
+	#menu-overlay h3:first-child { margin-top: 0; }
 	#menu-overlay .option {
 		display: flex; align-items: center; justify-content: space-between; width: 100%; margin-bottom: 8px;
 		padding: 10px 12px; border-radius: 8px; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea;
-		font: inherit; cursor: pointer; text-align: left;
+		font: inherit; cursor: pointer; text-align: left; flex: none;
 	}
 	#menu-overlay .option:last-child { margin-bottom: 0; }
 	#menu-overlay .option:hover:not(:disabled) { background: #232329; }
 	#menu-overlay .option:disabled { opacity: 0.45; cursor: not-allowed; }
 	#menu-overlay .option .badge { font-size: 10px; opacity: 0.7; }
-	#menu-overlay hr { border: 0; border-top: 1px solid #232329; margin: 16px 0 0; }
-	#menu-overlay .field { margin-bottom: 8px; }
+	#menu-overlay hr { border: 0; border-top: 1px solid #232329; margin: 16px 0 0; flex: none; }
+	#menu-overlay .field { margin-bottom: 8px; flex: none; }
 	#menu-overlay .field p { margin: 0 0 8px; font-size: 11px; opacity: 0.6; }
 	#menu-overlay input[type=text], #menu-overlay input[type=password] {
 		width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid #2c2c33;
 		background: #0e0e11; color: #e8e8ea; font: inherit;
 	}
-	#menu-overlay textarea {
-		width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid #2c2c33;
-		background: #0e0e11; color: #e8e8ea; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical;
-	}
-	#menu-overlay label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.8; margin: 8px 0; }
-	#menu-overlay .row { display: flex; gap: 8px; }
+	#menu-overlay label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.8; margin: 8px 0; flex: none; }
+	#menu-overlay .row { display: flex; gap: 8px; flex: none; }
 	#menu-overlay .row button { flex: 1; }
 	#menu-load-hint { margin: 0 0 12px; padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.4;
-		background: rgba(108,196,255,0.1); border: 1px solid rgba(108,196,255,0.35); color: #bfe4ff; }
+		background: rgba(108,196,255,0.1); border: 1px solid rgba(108,196,255,0.35); color: #bfe4ff; flex: none; }
 	#menu-load-hint[hidden] { display: none; }
+
+	/* ── Code tab ── */
+	#menu-code-empty { flex: none; font-size: 12px; opacity: 0.6; }
+	#menu-code-empty[hidden] { display: none; }
+	#menu-code-status { flex: none; margin-bottom: 8px; font-size: 11px; opacity: 0.75; }
+	#menu-code-status[hidden] { display: none; }
+	#menu-code-status.dirty { color: #ffcf6b; }
+	#menu-code-status.synced { color: #7fd0ff; }
+	#menu-code-editor { flex: 1; min-height: 0; border: 1px solid #2c2c33; border-radius: 8px; overflow: hidden; }
+	#menu-code-editor[hidden] { display: none; }
+	#menu-code-editor .CodeMirror { height: 100%; font-size: 12px; }
+	#menu-code-actions { display: flex; gap: 8px; margin-top: 10px; flex: none; }
+	#menu-code-actions button { flex: 1; }
 </style>
 </head>
 <body>
@@ -126,32 +152,58 @@
 					<h2>Strata Play</h2>
 					<button id="menu-close-btn" title="Close" aria-label="Close menu"><i class="fa-solid fa-xmark"></i></button>
 				</div>
-				<button id="menu-new" class="option">New</button>
-				<button id="menu-examples" class="option" disabled>Examples <span class="badge">coming soon</span></button>
 
-				<h3>Load from repo</h3>
-				<p id="menu-load-hint" hidden></p>
-				<div class="field"><input id="menu-repo" type="text" placeholder="owner/repo" autocomplete="off"></div>
-				<div class="field"><input id="menu-commit" type="text" placeholder="branch / tag / commit (optional)" autocomplete="off"></div>
-				<div class="field"><input id="menu-file" type="text" placeholder="path/to/game.glb" value="game.glb" autocomplete="off"></div>
-				<label class="check"><input id="menu-present" type="checkbox"> present (jsDelivr-first, for sharing/embeds)</label>
-				<button id="menu-load" class="option" style="justify-content:center;">Load</button>
+				<div id="menu-tabs">
+					<button class="active" data-tab="basics">Basics</button>
+					<button data-tab="git">Git</button>
+					<button data-tab="code">Code</button>
+				</div>
 
-				<h3>GitHub token (for Fork / Commit)</h3>
-				<p style="margin:0 0 8px;font-size:11px;opacity:0.6;">Stays in this page's own storage — never sent to the sandboxed game.</p>
-				<div class="field"><input id="menu-token" type="password" placeholder="ghp_…" autocomplete="off"></div>
-				<button id="menu-token-save" class="option" style="justify-content:center;">Save token</button>
+				<div class="tab-panel" data-tab-panel="basics">
+					<button id="menu-new" class="option">New</button>
+					<button id="menu-examples" class="option" disabled>Examples <span class="badge">coming soon</span></button>
 
-				<h3 id="menu-commit-heading" hidden>Commit changes</h3>
-				<p id="menu-commit-hint" hidden style="margin:0 0 8px;font-size:11px;opacity:0.6;">Pushes straight to <code id="menu-commit-target"></code> — no PR, no preview. Needs a token above.</p>
-				<div class="field" id="menu-commit-path-field" hidden><input id="menu-commit-path" type="text" placeholder="path/to/file" autocomplete="off"></div>
-				<div class="field" id="menu-commit-content-field" hidden><textarea id="menu-commit-content" rows="8" placeholder="file contents"></textarea></div>
-				<div class="field" id="menu-commit-message-field" hidden><input id="menu-commit-message" type="text" placeholder="commit message" autocomplete="off"></div>
-				<button id="menu-commit-btn" class="option" style="justify-content:center;" hidden>Commit to branch</button>
+					<h3>Load from repo</h3>
+					<p id="menu-load-hint" hidden></p>
+					<div class="field"><input id="menu-repo" type="text" placeholder="owner/repo" autocomplete="off"></div>
+					<div class="field"><input id="menu-commit" type="text" placeholder="branch / tag / commit (optional)" autocomplete="off"></div>
+					<div class="field"><input id="menu-file" type="text" placeholder="path/to/game.glb" value="game.glb" autocomplete="off"></div>
+					<label class="check"><input id="menu-present" type="checkbox"> present (jsDelivr-first, for sharing/embeds)</label>
+					<button id="menu-load" class="option" style="justify-content:center;">Load</button>
+				</div>
+
+				<div class="tab-panel" data-tab-panel="git" hidden>
+					<h3>GitHub token (for Fork / Commit)</h3>
+					<p style="margin:0 0 8px;font-size:11px;opacity:0.6;">Stays in this page's own storage — never sent to the sandboxed game.</p>
+					<div class="field"><input id="menu-token" type="password" placeholder="ghp_…" autocomplete="off"></div>
+					<button id="menu-token-save" class="option" style="justify-content:center;">Save token</button>
+
+					<h3 id="menu-commit-heading" hidden>Commit changes</h3>
+					<p id="menu-commit-hint" hidden style="margin:0 0 8px;font-size:11px;opacity:0.6;">Commits the Code tab's CURRENT content straight to <code id="menu-commit-target"></code> — no PR, no preview. Needs a token above.</p>
+					<div class="field" id="menu-commit-path-field" hidden><input id="menu-commit-path" type="text" placeholder="path/to/file" autocomplete="off"></div>
+					<div class="field" id="menu-commit-message-field" hidden><input id="menu-commit-message" type="text" placeholder="commit message" autocomplete="off"></div>
+					<button id="menu-commit-btn" class="option" style="justify-content:center;" hidden>Commit to branch</button>
+				</div>
+
+				<div class="tab-panel" data-tab-panel="code" hidden>
+					<p id="menu-code-empty">Load a game from a repo (Basics tab) to edit its entry module here.</p>
+					<p id="menu-code-status" hidden></p>
+					<div id="menu-code-editor" hidden><textarea id="menu-code-textarea"></textarea></div>
+					<div id="menu-code-actions" hidden>
+						<button id="menu-code-cancel-btn">Cancel</button>
+						<button id="menu-code-save-btn">Save</button>
+					</div>
+				</div>
 			</div>
 		</div>
 	</div>
 
+	<!-- Code editor for the menu's Code tab — plain <script> tags (CodeMirror 5
+	     predates ES modules), pinned version, same CDN convention as everything
+	     else here. -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
 	<script type="module" src="play.js"></script>
 </body>
 </html>

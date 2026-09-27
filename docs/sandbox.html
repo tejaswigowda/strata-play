@@ -236,6 +236,21 @@
 
 	}
 
+	// Shared, host-controlled audio: one AudioContext + master GainNode per
+	// sandbox instance. A game routes any sound through ctx.audio.destination
+	// instead of ctx.audio.context.destination directly, so the header's mute
+	// toggle (the ONLY thing that ever touches this gain) silences it for free
+	// — no per-game mute bookkeeping needed.
+	let masterGain = null;
+
+	window.addEventListener( 'message', ( event ) => {
+
+		const msg = event.data;
+		if ( ! msg || msg.type !== 'strata:mute' || ! masterGain ) return;
+		masterGain.gain.value = msg.muted ? 0 : 1;
+
+	} );
+
 	function reportError( err ) {
 
 		const message = String( ( err && err.message ) || err );
@@ -473,7 +488,12 @@
 	}
 
 	// ── Boot ────────────────────────────────────────────────────────────────────
-	async function boot( { source, file, entryOverride } ) {
+	async function boot( { source, file, entryOverride, muted } ) {
+
+		const audioCtx = new ( window.AudioContext || window.webkitAudioContext )();
+		masterGain = audioCtx.createGain();
+		masterGain.gain.value = muted ? 0 : 1;
+		masterGain.connect( audioCtx.destination );
 
 		const canvas = document.createElement( 'canvas' );
 		// Focusable + proactively focused: a keydown only ever reaches THIS
@@ -631,6 +651,7 @@
 			onFrame: ( fn ) => frameCallbacks.push( fn ),
 			onReset: ( fn ) => resetHandlers.push( fn ),
 			reset: () => { for ( const fn of resetHandlers ) { try { fn(); } catch ( e ) { console.error( e ); } } },
+			audio: { context: audioCtx, destination: masterGain },
 			state: {},
 		};
 
@@ -716,9 +737,16 @@
 		document.body.appendChild( startGate );
 
 		let gateOpen = false;
-		const openGate = () => { if ( gateOpen ) return; gateOpen = true; startGate.remove(); canvas.focus(); };
+		const openGate = ( ev ) => { if ( gateOpen ) return; gateOpen = true; startGate.remove(); canvas.focus(); if ( audioCtx.state === 'suspended' ) audioCtx.resume(); if ( ev ) ev.stopImmediatePropagation(); };
 		if ( isTouch ) startGate.addEventListener( 'pointerdown', openGate, { once: true } );
-		else window.addEventListener( 'keydown', openGate, { once: true } );
+		// Capture phase + stopImmediatePropagation: the game's own input.onKey
+		// (registered earlier, bubble phase, inside init()) would otherwise ALSO
+		// see this exact same keydown — e.g. a bubble-shooter's "Space fires"
+		// handler firing an unintended shot on the very keypress that just
+		// dismissed the gate. Capture always runs before bubble on the same
+		// target regardless of registration order, so this reliably swallows
+		// the dismiss keystroke before any game code observes it.
+		else window.addEventListener( 'keydown', openGate, { once: true, capture: true } );
 
 		renderer.xr.addEventListener( 'sessionstart', openGate );
 		renderer.xr.getController( 0 ).addEventListener( 'selectstart', openGate );

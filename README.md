@@ -165,11 +165,35 @@ above, `ctx` carries the small, shared harness every game is written against
 
 | | |
 |---|---|
-| `ctx.onFrame(fn)` | Runs at a **fixed timestep** (1/60s), decoupled from the render rate via a real accumulator — same inputs give the same result on a given pinned build, so Playwright runs are repeatable. Rendering still happens once per `requestAnimationFrame`. |
-| `ctx.input.axis(negCodes, posCodes)` / `.isDown(code)` | Named, device-adaptive input: held keys, falling back to a pointer/touch vertical drag when no bound key is held. `.onPointer`/`.onKey`/`.pointerRay()` remain for anything bespoke. |
+| `ctx.onFrame(fn)` | Runs at a **fixed timestep** (1/60s), decoupled from the render rate via a real accumulator — same inputs give the same result on a given pinned build, so Playwright runs are repeatable. Rendering still happens once per frame (`renderer.setAnimationLoop`, not a manual `requestAnimationFrame` chain — the one loop API that also drives an active WebXR session correctly). |
+| `ctx.input.axis(negCodes, posCodes)` / `.isDown(code)` | Named, device-adaptive input: held keys, falling back to a pointer/touch **horizontal** drag when no bound key is held (matches a left/right paddle-style game, e.g. Pong — the common case). `.onPointer`/`.onKey`/`.pointerRay()` remain for anything bespoke. |
 | `ctx.pick(selector)` | Raycaster helper: pointer → labeled pick, already wrapped as a `$S` set (`ctx.pick('.coin').setVisible(false)`). |
 | `ctx.bindBody(selectorOrObject, body)` / `ctx.getBody(...)` | cannon-es ↔ three sync: register (or look up) the body driving a labeled object; a `.dynamic` body's transform is copied onto its object every fixed step. |
 | `ctx.onReset(fn)` / `ctx.reset()` | Deterministic reset lifecycle — a game registers what "restart" means (score, ball position, …); the host or the game itself can trigger it. |
+
+Also strata-play standards (`sandbox.html`, every game, never per-game code):
+
+- **Click-to-play gate** — `onFrame`/physics never advance until a real user
+  gesture, device-appropriate rather than one-size-fits-all: a coarse pointer
+  (touch) gets "Tap to play" (`pointerdown` only — a touch surface can't hold
+  a key down); anything else gets "Press any key to play" (`keydown` only).
+  Entering a WebXR session, or a controller trigger once inside one, opens it
+  too. Rendering starts immediately either way — only the fixed-step loop is
+  held back, so the scene is never a blank screen while waiting.
+- **Pause on lost focus** — switching tabs/apps, or clicking back into the
+  host's own chrome (e.g. its Menu), pauses `onFrame`/physics the same way
+  (`window` `blur`/`focus` + `document.visibilitychange`), so a game left in a
+  background tab never silently racks up AI/physics/score the player didn't
+  see. Skipped while presenting in an XR session (a headset's compositor can
+  blur the 2D tab while the player is still actively in VR/AR).
+- **WebXR** — `renderer.xr.enabled` is always on; `VRButton`/`ARButton`
+  (three.js addons) only ever appear once `navigator.xr.isSessionSupported(...)`
+  confirms real support, so a device with no XR runtime never sees a dead
+  button. Any scene is automatically playable in a headset with zero
+  game-side work — no label, no opt-in, same as picking/physics. Requires the
+  sandbox `<iframe>` to delegate the permission (`allow="xr-spatial-tracking"`
+  in `index.html`) — an iframe blocks powerful features like this by default,
+  same reasoning as `allow="camera"`/`"microphone"` on any other embed.
 
 ### Label → physics body vocabulary
 
@@ -313,6 +337,8 @@ Per the strata-games work order's own discipline ("implemented ≠ verified"):
 - §5 fixed timestep + CCD wiring — exercised by Pong (`extras.ccd` on the ball); determinism holds across the repeated local runs in this dev loop.
 - §6 deploy contract (CDN-resolved, importmap-pinned, `#repo=` hash scheme) — `test/play.spec.mjs`, and manually via `#example=`.
 - §7 Pong acceptance criteria 1-5 — `test/pong.spec.mjs` (criteria 2-5 via the bundled `#example=pong` route), and criterion 1's literal form (a real, pushed `#repo=owner/repo&file=game.glb` URL) manually against `tejaswigowda/test1` (`outputs/pong.glb` + a generated `outputs/pong.js` entry, committed via the GitHub Contents API and loaded end-to-end: paddle input, AI, scoring, and the 7-point win condition all verified live).
+- Touch/drag input for a horizontal-axis game — `input.axis()`'s pointer-drag fallback drives the same axis a keyboard press would (right-drag → `+1`, matching `ArrowRight`), verified against Pong's real left/right paddle control.
+- Click-to-play gate, focus-loss pause, and WebXR support (§ "Game harness" above) — verified live: gate correctly gesture-gates `onFrame` (ball/AI/score frozen until dismissed, matching the device's own input type), `blur`/`focus` freezes and resumes the ball mid-flight with the render loop still running, and `renderer.xr.isSessionSupported` + `VRButton`/`ARButton` were exercised end-to-end against `tejaswigowda/test1` (no WebXR hardware in the dev-loop browser itself, so the buttons correctly stayed hidden there — confirmed via `navigator.xr.isSessionSupported` resolving `false`, not a bug).
 - Static hosting needs nothing beyond a plain file server: the served app (`docs/`) was verified end-to-end on GitHub Pages behind a custom domain (no node server, no build step) — every file, the CDN CORS headers (`Access-Control-Allow-Origin: *`, including for the sandbox's opaque `Origin: null`), the page's own CSP, and all three pinned import-map URLs (three/cannon-es/3dom) all resolve correctly as served.
 - No same-origin fetch from the sandbox on any static host — verified against `python -m http.server` (no CORS headers at all) with zero console errors.
 - Default-camera framing is scale-correct for any real-world scene, not just this repo's own hand-built examples — a real-world glTF (`tejaswigowda/test1`, a room-scale kitchen scene) initially rendered as a flat, featureless gray fill until the user dragged the mouse. Root cause (confirmed via a raycast from the camera, not a compositor/rendering bug): the default camera pose was a fixed, hardcoded position/lookAt tuned for this repo's own small, hand-built scenes, so on a much larger scene it ended up 0.4 units from a wall, filling the whole frame with one point-blank polygon face. Dragging only "fixed" it by accident (OrbitControls rotation moved the camera off that wall). Fixed by framing the camera (and the default orbit-view fallback's target) from the loaded scene's own `THREE.Box3` bounds instead of a magic-number pose — verified via the same real repo, screenshotted with zero interaction.
@@ -321,4 +347,3 @@ Per the strata-games work order's own discipline ("implemented ≠ verified"):
 - §7 acceptance criterion 6 ("the §1.5 red-team checklist passes for this game's sandbox") is verified once, generically, against the shared sandbox boundary rather than re-run per game — the isolation mechanism is identical for every game, so a per-game re-run would add no new coverage.
 - §2's "editor's live-preview MUST run inside the same sandbox as the player" — that's strata-editor's own preview path, out of this repo's scope; not implemented or verified here.
 - The Unity handoff half of §7 (glTFast import, labels → colliders, Y-up flip) — out of this repo's scope entirely (web path only).
-- Touch/drag input for a *horizontal*-axis game (Pong uses keyboard only in practice) — `input.axis()`'s pointer-drag fallback is wired for a *vertical* drag; a horizontal-axis game would need a small follow-up, not yet built or tested.

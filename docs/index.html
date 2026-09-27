@@ -18,13 +18,13 @@
 
 	.bar {
 		display: flex; align-items: center; gap: 8px;
-		padding: 8px 12px; background: #131317; border-bottom: 1px solid #232329;
+		padding: 8px 12px; background: #131317; border-bottom: 1px solid #232329;    
 	}
 	.bar h1 { font-size: 13px; font-weight: 600; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.9; }
 	.bar button, .bar a.btn {
 		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea;
 		padding: 5px 10px; border-radius: 6px; font: inherit; cursor: pointer; text-decoration: none; white-space: nowrap;
-		display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
+		display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;margin-bottom: 0px;
 	}
 	.bar button:hover, .bar a.btn:hover { background: #232329; }
 	#status { font-size: 12px; opacity: 0.65; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -125,6 +125,7 @@
 		<span id="status"></span>
 		<a id="open-source-link" class="btn" href="#" target="_blank" rel="noopener noreferrer" title="Open source" aria-label="Open source" hidden><i class="fa-brands fa-github"></i></a>
 		<button id="fork-btn" title="Fork" aria-label="Fork" hidden><i class="fa-solid fa-code-branch"></i></button>
+		<button id="mute-btn" title="Mute" aria-label="Mute"><i class="fa-solid fa-volume-high"></i></button>
 		<button id="restart-btn" title="Restart" aria-label="Restart"><i class="fa-solid fa-arrow-rotate-right"></i></button>
 		<button id="fullscreen-btn" title="Fullscreen" aria-label="Fullscreen"><i class="fa-solid fa-expand"></i></button>
 	</div>

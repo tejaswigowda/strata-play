@@ -24,6 +24,19 @@ import { parseRepo, loadSettings, saveSettings, forkRepo, commitFile } from './l
 
 const DEFAULT_EXAMPLE = 'hello';
 
+// A host-wide preference, not per-game — persists across reloads/restarts/forks
+// the same way the git token does, and is pushed into every sandboxed game via
+// postMessage (the sandbox has no localStorage of its own to read it from).
+let muted = localStorage.getItem( 'strata-play-muted' ) === '1';
+
+function updateMuteButton() {
+
+	els.muteBtn.title = muted ? 'Unmute' : 'Mute';
+	els.muteBtn.setAttribute( 'aria-label', els.muteBtn.title );
+	els.muteBtn.innerHTML = `<i class="fa-solid ${ muted ? 'fa-volume-xmark' : 'fa-volume-high' }"></i>`;
+
+}
+
 // A malicious game's forged "save" (work order §1.3/§1.5#5) must never be
 // acted on even when the size looks plausible — enforce a cap regardless.
 const MAX_SAVE_BYTES = 5 * 1024 * 1024;
@@ -37,6 +50,7 @@ const els = {
 	restartBtn: document.getElementById( 'restart-btn' ),
 	fullscreenBtn: document.getElementById( 'fullscreen-btn' ),
 	forkBtn: document.getElementById( 'fork-btn' ),
+	muteBtn: document.getElementById( 'mute-btn' ),
 	openSourceLink: document.getElementById( 'open-source-link' ),
 	menuBtn: document.getElementById( 'menu-btn' ),
 	menuOverlay: document.getElementById( 'menu-overlay' ),
@@ -269,6 +283,7 @@ function bootSandbox( loaded ) {
 				source: loaded.source,
 				file: loaded.file,
 				entryOverride: loaded.entryOverride, // set by the menu's Code-tab Save action; undefined otherwise (fetch as normal)
+				muted,
 			}, '*' );
 
 		} else if ( msg.type === 'strata:loaded' ) {
@@ -592,6 +607,16 @@ els.fullscreenBtn.addEventListener( 'click', () => {
 } );
 
 els.forkBtn.addEventListener( 'click', forkAndReload );
+
+updateMuteButton();
+els.muteBtn.addEventListener( 'click', () => {
+
+	muted = ! muted;
+	localStorage.setItem( 'strata-play-muted', muted ? '1' : '0' );
+	updateMuteButton();
+	els.iframe.contentWindow?.postMessage( { type: 'strata:mute', muted }, '*' );
+
+} );
 
 els.menuLoadBtn.addEventListener( 'click', loadFromMenu );
 

@@ -114,6 +114,18 @@
 	#menu-code-editor[hidden] { display: none; }
 	#menu-code-editor .CodeMirror { height: 100%; font-size: 12px; }
 	#menu-code-actions { display: flex; gap: 8px; margin-top: 10px; flex: none; }
+
+	/* ── Settings tab ── */
+	#menu-settings-empty { flex: none; font-size: 12px; opacity: 0.6; }
+	#menu-settings-empty[hidden] { display: none; }
+	.setting-row { flex: none; margin-bottom: 14px; }
+	.setting-row label { display: block; font-size: 12px; opacity: 0.85; margin-bottom: 6px; }
+	.setting-row select, .setting-row input[type=range] { width: 100%; }
+	.setting-row select {
+		padding: 6px 8px; border-radius: 6px; border: 1px solid #2c2c33; background: #0e0e11; color: #e8e8ea; font: inherit;
+	}
+	.setting-row .range-row { display: flex; align-items: center; gap: 8px; }
+	.setting-row .range-row output { font-size: 11px; opacity: 0.7; min-width: 34px; text-align: right; }
 	#menu-code-actions button { flex: 1; }
 </style>
 </head>
@@ -158,6 +170,7 @@
 					<button class="active" data-tab="basics">Basics</button>
 					<button data-tab="git">Git</button>
 					<button data-tab="code">Code</button>
+					<button data-tab="settings">Settings</button>
 				</div>
 
 				<div class="tab-panel" data-tab-panel="basics">
@@ -194,6 +207,11 @@
 						<button id="menu-code-cancel-btn">Cancel</button>
 						<button id="menu-code-save-btn">Save</button>
 					</div>
+				</div>
+
+				<div class="tab-panel" data-tab-panel="settings" hidden>
+					<p id="menu-settings-empty">This game has no configurable settings.</p>
+					<div id="menu-settings-list"></div>
 				</div>
 			</div>
 		</div>

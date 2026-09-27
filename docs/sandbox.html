@@ -251,6 +251,43 @@
 
 	} );
 
+	// Declarative settings (work order §3): the host owns the UI (Menu ->
+	// Settings tab), the sandbox only ever declares a schema and consumes
+	// resolved values — `settingsValues` is the SAME object exposed as
+	// ctx.settings, so a live `strata:setting` from the host is visible to a
+	// game holding onto that reference without any extra plumbing.
+	let settingsValues = {};
+	let settingCallbacks = [];
+
+	window.addEventListener( 'message', ( event ) => {
+
+		const msg = event.data;
+		if ( ! msg || msg.type !== 'strata:setting' ) return;
+		settingsValues[ msg.key ] = msg.value;
+		for ( const fn of settingCallbacks ) { try { fn( msg.key, msg.value ); } catch ( e ) { console.error( e ); } }
+
+	} );
+
+	function requestSettingsValues( settings ) {
+
+		return new Promise( ( resolve ) => {
+
+			function onValues( event ) {
+
+				const msg = event.data;
+				if ( ! msg || msg.type !== 'strata:settings-values' ) return;
+				window.removeEventListener( 'message', onValues );
+				resolve( msg.values || {} );
+
+			}
+
+			window.addEventListener( 'message', onValues );
+			postToParent( { type: 'strata:settings-schema', settings } );
+
+		} );
+
+	}
+
 	function reportError( err ) {
 
 		const message = String( ( err && err.message ) || err );
@@ -488,60 +525,131 @@
 	}
 
 	// ── Boot ────────────────────────────────────────────────────────────────────
-	async function boot( { source, file, entryOverride, muted } ) {
+	// ── Boot ────────────────────────────────────────────────────────────────────
+	// Split in two: the renderer/camera/canvas/audio/gate/pause/animation-loop
+	// below run exactly ONCE per sandbox document (see `bootedOnce` at the
+	// bottom) — every LATER strata:init (the menu's Code-tab Save action posts
+	// one straight to this already-running document, no iframe reload — see
+	// play.js's saveCode()) only re-runs loadGame() below: fetch + parse the
+	// scene .glb, rebuild ctx, call the entry module's init(ctx) again. This is
+	// exactly why ctx.onResize/ctx.onCleanup exist — a re-init reuses the same
+	// `window`, so a game that added its own `window.addEventListener('resize',
+	// …)` or scheduled its own audio nodes would otherwise pick up one more of
+	// each on every single Save.
+	let renderer, camera, canvas, audioCtx;
+	let currentScene = new THREE.Scene(); // swapped in by loadGame(); the loop always renders whatever this currently points at
+	let world = null;
+	let boundBodies = []; // dynamic: body -> object3d, synced after each fixed step
+	let kinematicBodies = []; // kinematic: object3d -> body, synced before each fixed step
 
-		const audioCtx = new ( window.AudioContext || window.webkitAudioContext )();
-		masterGain = audioCtx.createGain();
-		masterGain.gain.value = muted ? 0 : 1;
-		masterGain.connect( audioCtx.destination );
+	const frameCallbacks = [];
+	const resetHandlers = [];
+	const resizeCallbacks = [];
+	const cleanupCallbacks = [];
 
-		const canvas = document.createElement( 'canvas' );
-		// Focusable + proactively focused: a keydown only ever reaches THIS
-		// document if it already has focus, and nothing else does that for an
-		// iframe automatically — without this, "press any key to start" would
-		// silently do nothing until the player clicked first anyway.
-		canvas.tabIndex = -1;
-		document.body.appendChild( canvas );
-		canvas.focus();
+	function disposeScene( object ) {
 
-		const camera = new THREE.PerspectiveCamera( 50, innerWidth / innerHeight, 0.05, 1000 );
+		object.traverse( ( o ) => {
 
-		const renderer = new THREE.WebGLRenderer( { canvas, antialias: true } );
-		renderer.setPixelRatio( Math.min( devicePixelRatio || 1, 2 ) );
-		renderer.setSize( innerWidth, innerHeight );
-		renderer.outputColorSpace = THREE.SRGBColorSpace;
+			if ( o.geometry ) o.geometry.dispose();
+			if ( ! o.material ) return;
+			for ( const mat of Array.isArray( o.material ) ? o.material : [ o.material ] ) {
 
-		// WebXR (strata-play standard, every game — never per-game code): any
-		// scene is automatically playable in VR/AR headsets with zero game-side
-		// work. Buttons only ever appear when the browser actually reports
-		// support (`isSessionSupported`), so a desktop/mobile visitor with no
-		// XR runtime never sees a dead button.
-		renderer.xr.enabled = true;
-		if ( navigator.xr ) {
+				for ( const key in mat ) if ( mat[ key ] && mat[ key ].isTexture ) mat[ key ].dispose();
+				mat.dispose();
 
-			navigator.xr.isSessionSupported( 'immersive-vr' ).then( ( ok ) => { if ( ok ) document.body.appendChild( VRButton.createButton( renderer ) ); } ).catch( () => {} );
-			// Both buttons use three's own identical fixed "bottom center"
-			// styling, so a device supporting both sessions gets two buttons
-			// stacked directly on top of each other unless one is nudged —
-			// stack the AR button above the VR button instead of overlapping.
-			navigator.xr.isSessionSupported( 'immersive-ar' ).then( ( ok ) => {
-
-				if ( ! ok ) return;
-				const arButton = ARButton.createButton( renderer );
-				arButton.style.bottom = '74px';
-				document.body.appendChild( arButton );
-
-			} ).catch( () => {} );
-
-		}
-
-		window.addEventListener( 'resize', () => {
-
-			camera.aspect = innerWidth / innerHeight;
-			camera.updateProjectionMatrix();
-			renderer.setSize( innerWidth, innerHeight );
+			}
 
 		} );
+
+	}
+
+	// §2 — declarative HUD: absorbs the "texture a labeled panel with a
+	// CanvasTexture, clone-on-write material, redraw on change" boilerplate
+	// both example games used to hand-roll identically. In-world panel
+	// binding is primary — it renders inside the actual 3D scene, so it works
+	// in XR too; a DOM overlay would not.
+	function makeHud( $S, THREE, cleanupCallbacks, frameCallbacks ) {
+
+		return {
+
+			panel( selector, { width = 512, height = 256 } = {} ) {
+
+				const node = $S( selector ).toArray()[ 0 ];
+				if ( ! node ) return { number: () => {}, draw: () => {}, update: () => {} }; // no match — same graceful no-op the games' own `if (panel)` guards already gave this
+
+				const panelCanvas = document.createElement( 'canvas' );
+				panelCanvas.width = width;
+				panelCanvas.height = height;
+				const c2d = panelCanvas.getContext( '2d' );
+				const texture = new THREE.CanvasTexture( panelCanvas );
+				texture.colorSpace = THREE.SRGBColorSpace;
+				node.material = new THREE.MeshBasicMaterial( { map: texture } ); // a FRESH material every time — never mutate whatever the panel already had, never share one across panels
+				cleanupCallbacks.push( () => texture.dispose() );
+
+				let drawFn = null;
+
+				function redraw() {
+
+					if ( drawFn ) drawFn( c2d, panelCanvas );
+					texture.needsUpdate = true;
+
+				}
+
+				return {
+					// Full control — only renders on an explicit update() call
+					// unless { live: true } opts into a per-frame redraw.
+					draw( fn, { live = false } = {} ) {
+
+						drawFn = fn;
+						if ( live ) frameCallbacks.push( redraw );
+						redraw();
+
+					},
+					// The common case (a value that changes over time) — always
+					// kept in sync, no separate update() call needed.
+					number( fn, { background = '#12200f', color = '#d9f0c8', font } = {} ) {
+
+						drawFn = ( c, cv ) => {
+
+							c.fillStyle = background;
+							c.fillRect( 0, 0, cv.width, cv.height );
+							c.textAlign = 'center';
+							c.textBaseline = 'middle';
+							c.fillStyle = color;
+							c.font = font || `bold ${ Math.floor( cv.height * 0.55 ) }px monospace`;
+							c.fillText( String( fn() ), cv.width / 2, cv.height / 2 );
+
+						};
+						frameCallbacks.push( redraw );
+						redraw();
+
+					},
+					update: redraw,
+				};
+
+			},
+
+		};
+
+	}
+
+	// The re-runnable half of boot(): everything specific to ONE loaded game.
+	// Called once for the very first load (from bootHarnessOnce below), and
+	// again — directly, no iframe reload — for every later Code-tab Save.
+	async function loadGame( { source, file, entryOverride } ) {
+
+		// Teardown before setup: whatever the PREVIOUS init() registered via
+		// onFrame/onReset/onResize/onCleanup must not still be live once this
+		// game's own init() runs, or a repeated Save would accumulate one more
+		// resize listener / audio node / etc every time — the whole point of
+		// this lifecycle.
+		for ( const fn of cleanupCallbacks ) { try { fn(); } catch ( e ) { console.error( e ); } }
+		frameCallbacks.length = 0;
+		resetHandlers.length = 0;
+		resizeCallbacks.length = 0;
+		cleanupCallbacks.length = 0;
+		settingCallbacks.length = 0;
 
 		const fetchBytes = makeAssetFetcher( source );
 
@@ -552,6 +660,7 @@
 		const entryPath = scenePath.replace( /\.glb$/i, '.js' );
 
 		const scene = await loadGLB( await fetchBytes( scenePath ) );
+		disposeScene( currentScene ); // free the outgoing scene's GPU resources — nothing else would once we swap the reference below
 
 		// Frame the camera from the loaded scene's OWN bounds — a scene's real
 		// scale is never known in advance (a tabletop prop scene and a room-scale
@@ -585,10 +694,10 @@
 		// cannon-es.
 		const needsPhysics = [ 'static', 'dynamic', 'kinematic', 'trigger' ].some( ( c ) => $S( '.' + c ).exists );
 
-		let world = null;
+		world = null;
 		let CANNON = null;
-		const boundBodies = []; // dynamic: body -> object3d, synced after each fixed step
-		let kinematicBodies = []; // kinematic: object3d -> body, synced before each fixed step
+		boundBodies = [];
+		kinematicBodies = [];
 
 		function bindBody( selectorOrObject, body ) {
 
@@ -612,8 +721,6 @@
 
 		}
 
-		const frameCallbacks = [];
-		const resetHandlers = [];
 		const input = makeInput( canvas, camera );
 
 		const ctx = {
@@ -651,7 +758,22 @@
 			onFrame: ( fn ) => frameCallbacks.push( fn ),
 			onReset: ( fn ) => resetHandlers.push( fn ),
 			reset: () => { for ( const fn of resetHandlers ) { try { fn(); } catch ( e ) { console.error( e ); } } },
+			// §1 lifecycle: a game piggybacks on the harness's OWN single
+			// `window` resize listener (bootHarnessOnce below) instead of
+			// adding its own, and registers any teardown (audio nodes, timers,
+			// …) here — both registries are run/cleared at the top of THIS
+			// function on the next loadGame() call (Code-tab Save).
+			onResize: ( fn ) => resizeCallbacks.push( fn ),
+			onCleanup: ( fn ) => cleanupCallbacks.push( fn ),
 			audio: { context: audioCtx, destination: masterGain },
+			// §2 declarative HUD — see makeHud() above.
+			hud: makeHud( $S, THREE, cleanupCallbacks, frameCallbacks ),
+			// §3 declarative settings — resolved values (see requestSettingsValues
+			// below), live-updated in place by the module-level `strata:setting`
+			// listener above; onSetting only ever fires for a LIVE change, never
+			// the initial resolve.
+			settings: settingsValues,
+			onSetting: ( fn ) => settingCallbacks.push( fn ),
 			state: {},
 		};
 
@@ -711,7 +833,86 @@
 
 		if ( typeof mod.default !== 'function' ) throw new Error( `${ entryPath }: default export must be a function init(ctx)` );
 
+		// §3: an optional `config.settings` export declared beside `init` —
+		// never a third mandatory file. The host renders the actual UI (trust
+		// boundary: sandbox only ever declares + consumes, never draws host
+		// chrome); this round-trip always happens, even with an empty/missing
+		// schema, so the host can reliably clear a PREVIOUS game's Settings tab
+		// on a Save that switches to a game without any.
+		const schema = ( mod.config && Array.isArray( mod.config.settings ) ) ? mod.config.settings : [];
+		settingsValues = await requestSettingsValues( schema );
+		ctx.settings = settingsValues;
+
+		currentScene = scene;
+
 		await mod.default( ctx );
+
+		postToParent( { type: 'strata:loaded' } );
+
+	}
+
+	// ── One-time harness setup (renderer/camera/canvas/audio/XR/gate/pause/
+	// animation-loop) — runs exactly once per sandbox document; see
+	// `bootedOnce` at the bottom. Ends by calling loadGame() for the very
+	// first load.
+	async function bootHarnessOnce( initMsg ) {
+
+		audioCtx = new ( window.AudioContext || window.webkitAudioContext )();
+		masterGain = audioCtx.createGain();
+		masterGain.gain.value = initMsg.muted ? 0 : 1;
+		masterGain.connect( audioCtx.destination );
+
+		canvas = document.createElement( 'canvas' );
+		// Focusable + proactively focused: a keydown only ever reaches THIS
+		// document if it already has focus, and nothing else does that for an
+		// iframe automatically — without this, "press any key to start" would
+		// silently do nothing until the player clicked first anyway.
+		canvas.tabIndex = -1;
+		document.body.appendChild( canvas );
+		canvas.focus();
+
+		camera = new THREE.PerspectiveCamera( 50, innerWidth / innerHeight, 0.05, 1000 );
+
+		renderer = new THREE.WebGLRenderer( { canvas, antialias: true } );
+		renderer.setPixelRatio( Math.min( devicePixelRatio || 1, 2 ) );
+		renderer.setSize( innerWidth, innerHeight );
+		renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+		// WebXR (strata-play standard, every game — never per-game code): any
+		// scene is automatically playable in VR/AR headsets with zero game-side
+		// work. Buttons only ever appear when the browser actually reports
+		// support (`isSessionSupported`), so a desktop/mobile visitor with no
+		// XR runtime never sees a dead button.
+		renderer.xr.enabled = true;
+		if ( navigator.xr ) {
+
+			navigator.xr.isSessionSupported( 'immersive-vr' ).then( ( ok ) => { if ( ok ) document.body.appendChild( VRButton.createButton( renderer ) ); } ).catch( () => {} );
+			// Both buttons use three's own identical fixed "bottom center"
+			// styling, so a device supporting both sessions gets two buttons
+			// stacked directly on top of each other unless one is nudged —
+			// stack the AR button above the VR button instead of overlapping.
+			navigator.xr.isSessionSupported( 'immersive-ar' ).then( ( ok ) => {
+
+				if ( ! ok ) return;
+				const arButton = ARButton.createButton( renderer );
+				arButton.style.bottom = '74px';
+				document.body.appendChild( arButton );
+
+			} ).catch( () => {} );
+
+		}
+
+		// The harness owns the SINGLE `window` resize listener — a game
+		// registers via ctx.onResize(fn) instead of adding its own, so a
+		// repeated Save never stacks a second/third/… listener.
+		window.addEventListener( 'resize', () => {
+
+			camera.aspect = innerWidth / innerHeight;
+			camera.updateProjectionMatrix();
+			renderer.setSize( innerWidth, innerHeight );
+			for ( const fn of resizeCallbacks ) { try { fn(); } catch ( e ) { console.error( e ); } }
+
+		} );
 
 		// ── Click-to-play gate (strata-play standard, every game, never per-game
 		// code): game logic (onFrame/physics) never advances until a real user
@@ -830,7 +1031,7 @@
 
 			}
 
-			renderer.render( scene, camera );
+			renderer.render( currentScene, camera );
 
 		}
 
@@ -840,19 +1041,23 @@
 		// headset path to render at all once a VR/AR session starts.
 		renderer.setAnimationLoop( loop );
 
-		postToParent( { type: 'strata:loaded' } );
+		await loadGame( initMsg );
 
 	}
 
 	// ── Handshake ───────────────────────────────────────────────────────────────
-	let started = false;
+	// The FIRST strata:init runs the one-time harness setup above; every LATER
+	// one (the menu's Code-tab Save, posted straight to this already-running
+	// document — see play.js's saveCode()) only re-runs loadGame(), never a
+	// second renderer/canvas/audio-context/click-to-play-gate/etc.
+	let bootedOnce = false;
 
 	window.addEventListener( 'message', ( event ) => {
 
 		const msg = event.data;
-		if ( ! msg || msg.type !== 'strata:init' || started ) return;
-		started = true;
-		boot( msg ).catch( reportError );
+		if ( ! msg || msg.type !== 'strata:init' ) return;
+		if ( ! bootedOnce ) { bootedOnce = true; bootHarnessOnce( msg ).catch( reportError ); }
+		else loadGame( msg ).catch( reportError );
 
 	} );
 

@@ -82,10 +82,114 @@ const els = {
 	menuCodeActions: document.getElementById( 'menu-code-actions' ),
 	menuCodeCancelBtn: document.getElementById( 'menu-code-cancel-btn' ),
 	menuCodeSaveBtn: document.getElementById( 'menu-code-save-btn' ),
+	menuSettingsEmpty: document.getElementById( 'menu-settings-empty' ),
+	menuSettingsList: document.getElementById( 'menu-settings-list' ),
 };
 
 let current = null; // { source, dir, file, title, entryOverride }
 let pendingForkAfterToken = false; // set when Fork opened the menu to collect a missing token
+
+// ── Settings (work order §3) ────────────────────────────────────────────────────────
+// Declaration lives in the game's own `config.settings` export (sandbox-side);
+// the host only ever renders UI from that schema and stores the player's own
+// choices — per-player, local, NEVER written to the repo. Keyed per game so
+// two different games (or the same game loaded from two different repos)
+// never collide.
+function settingsStorageKey( loaded ) {
+
+	const { source, file } = loaded;
+	return source.kind === 'git'
+		? `strata-play-settings:${ source.owner }/${ source.repo }/${ file }`
+		: `strata-play-settings:local:${ source.example }/${ file }`;
+
+}
+
+function resolveSettingsValues( schema, key ) {
+
+	let saved = {};
+	try { saved = JSON.parse( localStorage.getItem( key ) || '{}' ); } catch { saved = {}; }
+
+	const values = {};
+	for ( const setting of schema ) values[ setting.key ] = ( setting.key in saved ) ? saved[ setting.key ] : setting.default;
+	return values;
+
+}
+
+function renderSettingsPanel( schema, key, values ) {
+
+	els.menuSettingsList.innerHTML = '';
+	els.menuSettingsEmpty.hidden = schema.length > 0;
+
+	for ( const setting of schema ) {
+
+		const row = document.createElement( 'div' );
+		row.className = 'setting-row';
+
+		const label = document.createElement( 'label' );
+		label.textContent = setting.label || setting.key;
+		row.appendChild( label );
+
+		const commit = ( value ) => {
+
+			values[ setting.key ] = value;
+			localStorage.setItem( key, JSON.stringify( values ) );
+			els.iframe.contentWindow?.postMessage( { type: 'strata:setting', key: setting.key, value }, '*' );
+
+		};
+
+		if ( setting.type === 'enum' ) {
+
+			const select = document.createElement( 'select' );
+			for ( const v of setting.values || [] ) {
+
+				const opt = document.createElement( 'option' );
+				opt.value = v;
+				opt.textContent = v;
+				opt.selected = v === values[ setting.key ];
+				select.appendChild( opt );
+
+			}
+			select.addEventListener( 'change', () => commit( select.value ) );
+			row.appendChild( select );
+
+		} else if ( setting.type === 'bool' ) {
+
+			const check = document.createElement( 'label' );
+			check.className = 'check';
+			const input = document.createElement( 'input' );
+			input.type = 'checkbox';
+			input.checked = !! values[ setting.key ];
+			input.addEventListener( 'change', () => commit( input.checked ) );
+			check.appendChild( input );
+			check.appendChild( document.createTextNode( setting.label || setting.key ) );
+			row.innerHTML = ''; // bool's own label doubles as the row label — drop the generic one above
+			row.appendChild( check );
+
+		} else if ( setting.type === 'range' ) {
+
+			const wrap = document.createElement( 'div' );
+			wrap.className = 'range-row';
+			const input = document.createElement( 'input' );
+			input.type = 'range';
+			input.min = setting.min ?? 0;
+			input.max = setting.max ?? 100;
+			input.step = setting.step ?? 1;
+			input.value = values[ setting.key ];
+			const out = document.createElement( 'output' );
+			out.textContent = values[ setting.key ];
+			input.addEventListener( 'input', () => { out.textContent = input.value; } );
+			input.addEventListener( 'change', () => commit( Number( input.value ) ) );
+			wrap.appendChild( input );
+			wrap.appendChild( out );
+			row.appendChild( wrap );
+
+		}
+
+		els.menuSettingsList.appendChild( row );
+
+	}
+
+}
 
 // ── Hash parsing ───────────────────────────────────────────────────────────
 // #repo=<owner>/<repo>[@ref]&file=<path>[&branch=<branch>][&commit=<sha|tag>]
@@ -269,6 +373,7 @@ function bootSandbox( loaded ) {
 	current = loaded;
 	updateChromeFor( loaded );
 	showOverlay( 'Loading game…' );
+	renderSettingsPanel( [], null, {} ); // clear the PREVIOUS game's Settings tab immediately — its own schema (if any) arrives once loadGame() gets far enough
 
 	const onMessage = ( event ) => {
 
@@ -313,6 +418,18 @@ function bootSandbox( loaded ) {
 			const reason = validateSaveRequest( msg, loaded ) || 'strata-play does not save during play (not an editor)';
 			els.iframe.contentWindow.postMessage( { type: 'strata:save-rejected', reason }, '*' );
 
+		} else if ( msg.type === 'strata:settings-schema' ) {
+
+			// §3: the sandbox only ever declares a schema; THIS host renders the
+			// actual Settings-tab UI and owns persistence (localStorage, keyed
+			// per game — never the repo). Replies right away so the sandbox can
+			// resolve ctx.settings before calling the game's own init(ctx).
+			const schema = Array.isArray( msg.settings ) ? msg.settings : [];
+			const key = settingsStorageKey( loaded );
+			const values = resolveSettingsValues( schema, key );
+			renderSettingsPanel( schema, key, values );
+			els.iframe.contentWindow.postMessage( { type: 'strata:settings-values', values }, '*' );
+
 		}
 		// Any other message type is silently ignored — allowlist, not denylist.
 
@@ -331,6 +448,27 @@ function restart() {
 	if ( els.iframe._strataCleanup ) els.iframe._strataCleanup();
 	els.iframe.src = 'about:blank';
 	requestAnimationFrame( () => bootSandbox( current ) );
+
+}
+
+// §1 lifecycle: the Code tab's Save action posts a fresh strata:init straight
+// to the ALREADY-RUNNING sandbox document instead of reloading the iframe
+// (restart() above) — the sandbox's own loadGame() re-fetches/rebuilds just
+// the game half (scene, ctx, init(ctx)) in place, never a second renderer/
+// canvas/audio-context/click-to-play-gate. The existing onMessage listener
+// (still attached — the iframe never navigated) handles the strata:loaded/
+// strata:error reply exactly like a normal load.
+function hotReloadGame() {
+
+	if ( ! current ) return;
+	showOverlay( 'Reloading…' );
+	els.iframe.contentWindow?.postMessage( {
+		type: 'strata:init',
+		source: current.source,
+		file: current.file,
+		entryOverride: current.entryOverride,
+		muted,
+	}, '*' );
 
 }
 
@@ -540,7 +678,7 @@ function saveCode() {
 	current.entryOverride = codeMirror.getValue();
 	lastSyncedSource = current.entryOverride;
 	updateCodeStatus();
-	restart();
+	hotReloadGame();
 
 }
 

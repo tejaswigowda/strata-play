@@ -194,6 +194,19 @@ Also strata-play standards (`sandbox.html`, every game, never per-game code):
   sandbox `<iframe>` to delegate the permission (`allow="xr-spatial-tracking"`
   in `index.html`) — an iframe blocks powerful features like this by default,
   same reasoning as `allow="camera"`/`"microphone"` on any other embed.
+- **Sound — Web Audio only, host-controlled mute.** `ctx.audio = { context,
+  destination }` is a single `AudioContext` + master `GainNode` shared by the
+  whole sandbox instance; a game routes every sound/music oscillator through
+  `ctx.audio.destination` instead of `ctx.audio.context.destination` directly.
+  The header's mute button (top bar) is the *only* thing that ever touches
+  that gain (`1` unmuted / `0` muted) — no per-game mute bookkeeping at all.
+  The preference persists in the host's own `localStorage` and is pushed into
+  the sandbox via `strata:init`'s `muted` field plus a live `strata:mute`
+  message on every toggle. The context is resumed on the same click-to-play
+  gesture the gate already requires, satisfying the browser's autoplay
+  policy. No audio files, ever — every sound a game makes (this repo's own
+  Pong background music and Bubbles sfx included, in the linked example
+  repo) is synthesized with oscillators + gain envelopes.
 
 ### Label → physics body vocabulary
 
@@ -250,13 +263,15 @@ normally.
 ## Minimal play UI
 
 Chrome-light, by design: fullscreen, restart, a title, an "Open source" link,
-and a **Fork** button (clones the current repo to your account via the GitHub
+a **Fork** button (clones the current repo to your account via the GitHub
 API — needs a token, entered once and kept only in the host's own
-`localStorage` — then reloads the shell against the fork). All icons
-(Font Awesome, pinned CDN version), no text labels — this is chrome, not a
-toolbar. Authoring stays in the agent + VS Code + the Strata scene editor;
-the in-menu editor below is for quick, self-service tweaks to an already-
-authored game, not a replacement for that workflow.
+`localStorage` — then reloads the shell against the fork), and a **Mute**
+button (toggles the shared `ctx.audio` gain every game's sound routes
+through — see "Sound" above; persists across reloads/forks/restarts). All
+icons (Font Awesome, pinned CDN version), no text labels — this is chrome,
+not a toolbar. Authoring stays in the agent + VS Code + the Strata scene
+editor; the in-menu editor below is for quick, self-service tweaks to an
+already-authored game, not a replacement for that workflow.
 
 The **Menu** button (top-left) opens a tabbed panel — **Basics**, **Git**,
 **Code** — closable via the header's × or a backdrop click:
@@ -342,6 +357,7 @@ Per the strata-games work order's own discipline ("implemented ≠ verified"):
 - Static hosting needs nothing beyond a plain file server: the served app (`docs/`) was verified end-to-end on GitHub Pages behind a custom domain (no node server, no build step) — every file, the CDN CORS headers (`Access-Control-Allow-Origin: *`, including for the sandbox's opaque `Origin: null`), the page's own CSP, and all three pinned import-map URLs (three/cannon-es/3dom) all resolve correctly as served.
 - No same-origin fetch from the sandbox on any static host — verified against `python -m http.server` (no CORS headers at all) with zero console errors.
 - Default-camera framing is scale-correct for any real-world scene, not just this repo's own hand-built examples — a real-world glTF (`tejaswigowda/test1`, a room-scale kitchen scene) initially rendered as a flat, featureless gray fill until the user dragged the mouse. Root cause (confirmed via a raycast from the camera, not a compositor/rendering bug): the default camera pose was a fixed, hardcoded position/lookAt tuned for this repo's own small, hand-built scenes, so on a much larger scene it ended up 0.4 units from a wall, filling the whole frame with one point-blank polygon face. Dragging only "fixed" it by accident (OrbitControls rotation moved the camera off that wall). Fixed by framing the camera (and the default orbit-view fallback's target) from the loaded scene's own `THREE.Box3` bounds instead of a magic-number pose — verified via the same real repo, screenshotted with zero interaction.
+- `ctx.audio` + the header's Mute toggle — verified end-to-end against `tejaswigowda/test1`: a `createOscillator` call-count check tied to an actual game action (Pong's music scheduler, Bubbles' fire/pop/etc. sfx) confirms real oscillators land on `ctx.audio.context`, clicking the header's Mute button flips `ctx.audio.destination.gain.value` between `1` and `0` live (both games, no per-game code involved), and the `0`/`1` choice survives a full page reload via the persisted preference. No audio files anywhere — both linked example games' sound is 100% synthesized (oscillators + gain envelopes).
 
 **Expected, not yet verified** (be precise about the gap, not silent about it):
 - §7 acceptance criterion 6 ("the §1.5 red-team checklist passes for this game's sandbox") is verified once, generically, against the shared sandbox boundary rather than re-run per game — the isolation mechanism is identical for every game, so a per-game re-run would add no new coverage.

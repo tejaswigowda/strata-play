@@ -46,7 +46,7 @@ isn't. To play a game from a real repo:
 http://127.0.0.1:5510/#repo=owner/repo&file=game.glb
 ```
 
-## The URL scheme (identical to strata-editor)
+## The URL scheme
 
 ```
 #repo=<owner>/<repo>[@ref]&file=<name>.glb[&commit=<sha|tag>][&present=true]
@@ -61,6 +61,11 @@ http://127.0.0.1:5510/#repo=owner/repo&file=game.glb
 - `present=true` (or `preview=true`) — prefer jsDelivr first (scale over
   freshness); the default (`authoring`) tries `raw.githubusercontent.com`
   first, so a change just pushed to the game repo shows up on reload.
+
+Not identical to strata-editor's own scheme: that project's ref parameter is
+named `branch=`; this one is `commit=` (same most-specific-wins semantics,
+different name — a holdover from before the two projects' schemes were
+compared side by side). Everything else (`repo=`, `file=`, `present=`) matches.
 
 Reads (the scene GLB, the entry JS) resolve through the same CDN edges
 strata-editor uses (`docs/lib/git-resolver.js`, vendored unchanged from that
@@ -103,6 +108,12 @@ export default function init( ctx ) {
   // ctx.onFrame(fn)  fixed-timestep (1/60s) update — the runtime owns the loop
   // ctx.onReset(fn) / ctx.reset()   deterministic reset lifecycle
   // ctx.state      a plain object the game reads/writes
+  // ctx.audio      { context, destination } — the runtime's shared AudioContext/GainNode; connect through destination so the host's mute toggle covers it for free
+  // ctx.onResize(fn)   register a callback for the runtime's own single window resize listener — never add your own
+  // ctx.onCleanup(fn)  register teardown that runs before this game's init() re-runs (Code-tab Save) or a new game loads — same lifecycle guarantee whether or not the frame actually reloaded
+  // ctx.hud        declarative in-world HUD panels — ctx.hud.panel(selector, {width,height}) returns { draw(fn,{live}), number(fn,{...}), update() }; a non-matching selector returns a silent no-op handle
+  // ctx.settings   resolved current values for this game's declared `config.settings` (defaults merged with whatever the player has saved), or {} if the module exports no config
+  // ctx.onSetting(fn)  fires (key, value) only for LIVE changes made while playing — read ctx.settings for the resolved value at init time
 }
 ```
 
@@ -170,6 +181,9 @@ above, `ctx` carries the small, shared harness every game is written against
 | `ctx.pick(selector)` | Raycaster helper: pointer → labeled pick, already wrapped as a `$S` set (`ctx.pick('.coin').setVisible(false)`). |
 | `ctx.bindBody(selectorOrObject, body)` / `ctx.getBody(...)` | cannon-es ↔ three sync: register (or look up) the body driving a labeled object; a `.dynamic` body's transform is copied onto its object every fixed step. |
 | `ctx.onReset(fn)` / `ctx.reset()` | Deterministic reset lifecycle — a game registers what "restart" means (score, ball position, …); the host or the game itself can trigger it. |
+| `ctx.onResize(fn)` | The runtime owns the **single** `window` `resize` listener; a game registers here instead of adding its own (see "Lifecycle" below for why that matters). |
+| `ctx.onCleanup(fn)` | Registers teardown (disconnect a `GainNode`, stop a scheduler, …) that runs before this game's `init()` re-runs or a new game loads — see "Lifecycle" below. |
+| `ctx.hud.panel(selector, {width,height})` | Textures a labeled panel mesh with a `CanvasTexture` + a **fresh** material (never mutates one shared with another mesh) — returns `{ draw(fn,{live}), number(fn,{...}), update() }`. A selector that matches nothing returns a silent no-op handle (never throws). In-world, so it renders correctly in an XR session too — a DOM overlay would not. |
 
 Also strata-play standards (`sandbox.html`, every game, never per-game code):
 
@@ -207,6 +221,31 @@ Also strata-play standards (`sandbox.html`, every game, never per-game code):
   policy. No audio files, ever — every sound a game makes (this repo's own
   Pong background music and Bubbles sfx included, in the linked example
   repo) is synthesized with oscillators + gain envelopes.
+- **Lifecycle (Code-tab Save is a true in-place hot-reload, not a full
+  iframe reload)** — the runtime is split into a one-time harness boot
+  (renderer, camera, audio context, the single resize listener, click-to-play
+  gate, WebXR buttons) and a re-runnable game load (fetch scene, rebuild
+  `ctx`, call `init(ctx)` again). Saving in the Menu's Code tab posts a fresh
+  scene/entry straight to the already-running sandbox instead of reloading
+  the `<iframe>`. Before the new `init()` runs, the runtime runs every
+  pending `ctx.onCleanup` callback and clears the `onResize`/`onFrame`/
+  `onReset` registries — whether or not the frame actually reloaded, so a
+  game never accumulates duplicate listeners, oscillators, or callbacks
+  across repeated Saves.
+- **Settings** — a game optionally exports `config` alongside `init`:
+  `export const config = { settings: [ { key, type: 'enum'|'bool'|'range',
+  values/min/max/step, default, label }, … ] }`. The runtime reads that
+  schema and hands it to the (trusted) host, which renders the actual
+  Settings UI in its own Menu — native controls, no sandbox-drawn chrome —
+  and persists the player's choices in **its own** `localStorage`, keyed per
+  game, per player; **never** written back to the game's repo. `ctx.settings`
+  exposes the resolved current values (saved values merged over the
+  schema's own defaults) at `init(ctx)` time; `ctx.onSetting((key,value) =>
+  …)` fires only for changes made live while playing. Not shown inside an
+  active XR session (the Settings panel is host DOM, not part of the
+  rendered scene) — same honesty-ledger status as the cross-engine JSON
+  portability of the schema itself: expected to round-trip to e.g. a Unity
+  importer, not yet verified there.
 
 ### Label → physics body vocabulary
 
@@ -353,13 +392,18 @@ Per the strata-games work order's own discipline ("implemented ≠ verified"):
 - §6 deploy contract (CDN-resolved, importmap-pinned, `#repo=` hash scheme) — `test/play.spec.mjs`, and manually via `#example=`.
 - §7 Pong acceptance criteria 1-5 — `test/pong.spec.mjs` (criteria 2-5 via the bundled `#example=pong` route), and criterion 1's literal form (a real, pushed `#repo=owner/repo&file=game.glb` URL) manually against `tejaswigowda/test1` (`outputs/pong.glb` + a generated `outputs/pong.js` entry, committed via the GitHub Contents API and loaded end-to-end: paddle input, AI, scoring, and the 7-point win condition all verified live).
 - Touch/drag input for a horizontal-axis game — `input.axis()`'s pointer-drag fallback drives the same axis a keyboard press would (right-drag → `+1`, matching `ArrowRight`), verified against Pong's real left/right paddle control.
-- Click-to-play gate, focus-loss pause, and WebXR support (§ "Game harness" above) — verified live: gate correctly gesture-gates `onFrame` (ball/AI/score frozen until dismissed, matching the device's own input type), `blur`/`focus` freezes and resumes the ball mid-flight with the render loop still running, and `renderer.xr.isSessionSupported` + `VRButton`/`ARButton` were exercised end-to-end against `tejaswigowda/test1` (no WebXR hardware in the dev-loop browser itself, so the buttons correctly stayed hidden there — confirmed via `navigator.xr.isSessionSupported` resolving `false`, not a bug).
+- Click-to-play gate and focus-loss pause (§ "Game harness" above) — verified live: gate correctly gesture-gates `onFrame` (ball/AI/score frozen until dismissed, matching the device's own input type), and `blur`/`focus` freezes and resumes the ball mid-flight with the render loop still running.
+- WebXR: immersive-vr session + stereo head-tracked rendering verified on phone VR (3DoF); no-XR fallback (buttons hidden when `isSessionSupported` is false) verified; 6DoF standalone headset + controllers/hand-tracking — expected, not yet verified.
 - Static hosting needs nothing beyond a plain file server: the served app (`docs/`) was verified end-to-end on GitHub Pages behind a custom domain (no node server, no build step) — every file, the CDN CORS headers (`Access-Control-Allow-Origin: *`, including for the sandbox's opaque `Origin: null`), the page's own CSP, and all three pinned import-map URLs (three/cannon-es/3dom) all resolve correctly as served.
 - No same-origin fetch from the sandbox on any static host — verified against `python -m http.server` (no CORS headers at all) with zero console errors.
 - Default-camera framing is scale-correct for any real-world scene, not just this repo's own hand-built examples — a real-world glTF (`tejaswigowda/test1`, a room-scale kitchen scene) initially rendered as a flat, featureless gray fill until the user dragged the mouse. Root cause (confirmed via a raycast from the camera, not a compositor/rendering bug): the default camera pose was a fixed, hardcoded position/lookAt tuned for this repo's own small, hand-built scenes, so on a much larger scene it ended up 0.4 units from a wall, filling the whole frame with one point-blank polygon face. Dragging only "fixed" it by accident (OrbitControls rotation moved the camera off that wall). Fixed by framing the camera (and the default orbit-view fallback's target) from the loaded scene's own `THREE.Box3` bounds instead of a magic-number pose — verified via the same real repo, screenshotted with zero interaction.
 - `ctx.audio` + the header's Mute toggle — verified end-to-end against `tejaswigowda/test1`: a `createOscillator` call-count check tied to an actual game action (Pong's music scheduler, Bubbles' fire/pop/etc. sfx) confirms real oscillators land on `ctx.audio.context`, clicking the header's Mute button flips `ctx.audio.destination.gain.value` between `1` and `0` live (both games, no per-game code involved), and the `0`/`1` choice survives a full page reload via the persisted preference. No audio files anywhere — both linked example games' sound is 100% synthesized (oscillators + gain envelopes).
+- Lifecycle (`ctx.onResize`/`ctx.onCleanup`, Code-tab Save as an in-place hot-reload) — verified against `tejaswigowda/test1`'s Pong: after migrating its own `window.addEventListener('resize', …)` to `ctx.onResize` and adding `ctx.onCleanup(() => musicGain.disconnect())`, 3 repeated in-place reloads (simulating 3 Code-tab Saves) showed zero growth in `window`'s own `resize`-listener count and no duplicate `<canvas>`/renderer, while resize itself still correctly re-fit the camera afterward.
+- `ctx.hud` — verified against both linked example games: Pong's Marquee_Panel and Bubbles' Sign_Panel both migrated from hand-rolled `CanvasTexture`/`MeshBasicMaterial` code to `ctx.hud.panel(selector, {...}).draw(fn)` + `.update()`, rendering identically (score, win/lose text) with the old boilerplate deleted.
+- `ctx.settings`/`ctx.onSetting` — verified end-to-end with a synthetic `config.settings` schema (enum/bool/range) loaded via the Menu's Code tab: the host's Settings panel rendered native controls from the schema, changing a value fired `ctx.onSetting` live in the sandbox and persisted to a per-game key in the **host's own** `localStorage` (confirmed absent from the game's repo — the whole round trip is postMessage + host-side storage, no GitHub API call involved).
 
 **Expected, not yet verified** (be precise about the gap, not silent about it):
 - §7 acceptance criterion 6 ("the §1.5 red-team checklist passes for this game's sandbox") is verified once, generically, against the shared sandbox boundary rather than re-run per game — the isolation mechanism is identical for every game, so a per-game re-run would add no new coverage.
 - §2's "editor's live-preview MUST run inside the same sandbox as the player" — that's strata-editor's own preview path, out of this repo's scope; not implemented or verified here.
 - The Unity handoff half of §7 (glTFast import, labels → colliders, Y-up flip) — out of this repo's scope entirely (web path only).
+- `config.settings`'s JSON schema round-tripping into a non-web engine's own settings UI (e.g. a Unity importer) — expected to be plain, portable JSON same as the label vocabulary itself, but not verified outside this web host.

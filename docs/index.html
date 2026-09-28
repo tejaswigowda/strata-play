@@ -11,6 +11,7 @@
      plain <script>/<link> (CodeMirror 5 predates ES modules), no build step. -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/dialog/dialog.min.css">
 <style>
 	:root { color-scheme: dark; }
 	* { box-sizing: border-box; }
@@ -24,8 +25,9 @@
 	.bar button, .bar a.btn {
 		appearance: none; border: 1px solid #2c2c33; background: #1b1b20; color: #e8e8ea;
 		padding: 5px 10px; border-radius: 6px; font: inherit; cursor: pointer; text-decoration: none; white-space: nowrap;
-		display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;margin-bottom: 0px;
+		display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-bottom: 0px;
 	}
+	.bar button i, .bar a.btn i { padding-top: 4px; } /* Font Awesome glyphs sit high in their own line box — nudge down to visually center */
 	.bar button:hover, .bar a.btn:hover { background: #232329; }
 	#status { font-size: 12px; opacity: 0.65; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -114,6 +116,10 @@
 	#menu-code-editor[hidden] { display: none; }
 	#menu-code-editor .CodeMirror { height: 100%; font-size: 12px; }
 	#menu-code-actions { display: flex; gap: 8px; margin-top: 10px; flex: none; }
+	/* CodeMirror's search addon draws its find/replace bar as an absolutely-
+	   positioned .CodeMirror-dialog INSIDE the editor — dark theme to match. */
+	.CodeMirror-dialog { background: #1b1b20; color: #e8e8ea; border-bottom: 1px solid #2c2c33; }
+	.CodeMirror-dialog input { background: #0e0e11; color: #e8e8ea; border: 1px solid #2c2c33; border-radius: 4px; padding: 2px 6px; }
 
 	/* ── Settings tab ── */
 	#menu-settings-empty { flex: none; font-size: 12px; opacity: 0.6; }
@@ -204,6 +210,8 @@
 					<p id="menu-code-status" hidden></p>
 					<div id="menu-code-editor" hidden><textarea id="menu-code-textarea"></textarea></div>
 					<div id="menu-code-actions" hidden>
+						<button id="menu-code-find-btn">Find</button>
+						<button id="menu-code-replace-btn">Replace</button>
 						<button id="menu-code-cancel-btn">Cancel</button>
 						<button id="menu-code-save-btn">Save</button>
 					</div>
@@ -222,7 +230,10 @@
 	     else here. -->
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
-	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
-	<script type="module" src="play.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script><!-- Find/replace (Ctrl-F, Ctrl-Alt-F, Ctrl-Shift-F and friends work out of the
+     box once these are loaded, plus the explicit Find/Replace buttons below). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/dialog/dialog.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/search.min.js"></script>	<script type="module" src="play.js"></script>
 </body>
 </html>

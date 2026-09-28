@@ -80,6 +80,8 @@ const els = {
 	menuCodeEditor: document.getElementById( 'menu-code-editor' ),
 	menuCodeTextarea: document.getElementById( 'menu-code-textarea' ),
 	menuCodeActions: document.getElementById( 'menu-code-actions' ),
+	menuCodeFindBtn: document.getElementById( 'menu-code-find-btn' ),
+	menuCodeReplaceBtn: document.getElementById( 'menu-code-replace-btn' ),
 	menuCodeCancelBtn: document.getElementById( 'menu-code-cancel-btn' ),
 	menuCodeSaveBtn: document.getElementById( 'menu-code-save-btn' ),
 	menuSettingsEmpty: document.getElementById( 'menu-settings-empty' ),
@@ -772,6 +774,8 @@ els.menuTokenSaveBtn.addEventListener( 'click', () => {
 els.menuCommitBtn.addEventListener( 'click', commitChanges );
 els.menuCodeSaveBtn.addEventListener( 'click', saveCode );
 els.menuCodeCancelBtn.addEventListener( 'click', cancelCode );
+els.menuCodeFindBtn.addEventListener( 'click', () => ensureCodeMirror().execCommand( 'find' ) );
+els.menuCodeReplaceBtn.addEventListener( 'click', () => ensureCodeMirror().execCommand( 'replace' ) );
 
 els.menuBtn.addEventListener( 'click', () => openMenu() ); // NOT `openMenu` directly — the click's own PointerEvent would leak in as `hint`
 els.menuNewBtn.addEventListener( 'click', startNew );

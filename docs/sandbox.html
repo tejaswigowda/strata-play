@@ -332,7 +332,7 @@
 			const loader = new GLTFLoader();
 			loader.setDRACOLoader( dracoLoader );
 			const buf = bytes.buffer.slice( bytes.byteOffset, bytes.byteOffset + bytes.byteLength );
-			loader.parse( buf, '', ( gltf ) => resolve( gltf.scene ), reject );
+			loader.parse( buf, '', ( gltf ) => resolve( { scene: gltf.scene, animations: gltf.animations } ), reject );
 
 		} );
 
@@ -659,7 +659,7 @@
 		const scenePath = file;
 		const entryPath = scenePath.replace( /\.glb$/i, '.js' );
 
-		const scene = await loadGLB( await fetchBytes( scenePath ) );
+		const { scene, animations: sceneAnimations } = await loadGLB( await fetchBytes( scenePath ) );
 		disposeScene( currentScene ); // free the outgoing scene's GPU resources — nothing else would once we swap the reference below
 
 		// Frame the camera from the loaded scene's OWN bounds — a scene's real
@@ -726,6 +726,10 @@
 		const ctx = {
 			THREE,
 			scene,
+			// GLTFLoader's own parsed clips for this scene (never retargeted,
+			// so they only ever animate correctly against THIS scene's own
+			// rig/bind pose) — empty array for a scene authored with none.
+			animations: sceneAnimations || [],
 			$S,
 			camera,
 			renderer,

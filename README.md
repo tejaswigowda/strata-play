@@ -125,7 +125,62 @@ instead of three steps of silent nothing happening once the game's own code
 runs. `requires` is optional; a module with none skips this check entirely
 (same opt-in spirit as `config.settings`).
 
-### The `init(ctx)` contract — the whole game API
+An `'input:X'` entry in `requires` (e.g. `'input:pose'`) asks for a named
+**input provider** instead of a scene label — see "Input providers" below.
+
+### Input providers — label-addressable camera/pose input, never the raw camera
+
+A provider is a sibling-frame input source (e.g. body pose from
+[posecaster](https://posecaster.com/)) that the HOST — never the game — owns
+and relays as plain numbers. The load-bearing property: **the camera never
+enters the game sandbox.** Pixels stay inside posecaster's own iframe; the
+game only ever sees landmark numbers via `ctx.input`/`ctx.onPose`.
+
+```js
+export const requires = [ '#RightShoulder', '#LeftShoulder', 'input:pose' ];
+
+export default function init( ctx ) {
+
+  ctx.onPose( ( frame ) => {
+    // frame = { t, pose: [ { name, x, y, z, score }, ... ], hands?, face? }
+    const wrist = frame.pose.find( ( lm ) => lm.name === 'RIGHT_WRIST' );
+  } );
+
+}
+```
+
+- `ctx.input.on( provider, fn )` subscribes to any named provider's latest
+  sample; `ctx.onPose( fn )` is sugar for `ctx.input.on( 'pose', fn )`.
+  `ctx.input.pose()` reads the latest sample synchronously (or `null` before
+  the first frame arrives).
+- Declaring `'input:pose'` in `requires` is what makes the host actually open
+  the provider — lazily, on demand, and only for a loaded game that asks for
+  it (`docs/index.html`'s `#pose-provider` iframe stays `hidden`, `src`-less,
+  with no camera permission, until then).
+- See `examples/posepuppet/` for a full worked example: a simple rigged
+  figure whose `#RightShoulder`/`#LeftShoulder` bones aim themselves at the
+  live shoulder→wrist landmark direction each frame — moving in front of the
+  camera visibly swings the arm.
+- Architecture: `docs/index.html` embeds posecaster
+  (`https://posecaster.com/models/pose/index.html#out=postmessage&target=…`)
+  as a frame **sibling to**, never a child of, the game sandbox — explicitly
+  allowlisted via a new, narrowly-scoped CSP (`frame-src 'self'
+  https://posecaster.com;`, no `default-src`, every other directive
+  untouched). `docs/play.js` validates every posted frame's origin+shape
+  before relaying it into the sandbox as an ordinary `strata:input` message;
+  the sandbox only trusts messages whose `event.source === window.parent`
+  (not shape — shape alone is never trusted across an origin boundary), which
+  also defeats a self-posted forgery from inside the game's own sandbox
+  (`event.source === window` there, not `window.parent`). The game sandbox's
+  own `allow`/`connect-src` are untouched by any of this — no camera
+  permission, no new egress, ever, for the sandbox itself.
+- posecaster's own `out=postmessage&target=<origin>` mode (added upstream,
+  see [posecaster/posecaster](https://github.com/posecaster/posecaster)) is
+  purely additive and fails closed: no/malformed `target` posts nothing, and
+  its default/legacy websocket mode is completely unchanged when `out` is
+  absent.
+
+
 
 The entry module (`game.js`, alongside `game.glb`) default-exports `init(ctx)`:
 

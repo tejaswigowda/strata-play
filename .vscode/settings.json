@@ -1,0 +1,7 @@
+{
+	// Live Server (ritwickdey.liveserver) roots at the workspace folder by
+	// default — since the served app moved to docs/ (GitHub Pages' "serve
+	// from /docs" convention), point it there so http://localhost:5500 keeps
+	// resolving straight to docs/index.html, same as before the move.
+	"liveServer.settings.root": "/docs"
+}

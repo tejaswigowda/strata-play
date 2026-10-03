@@ -89,6 +89,7 @@ const els = {
 	watchdogOverlay: document.getElementById( 'watchdog-overlay' ),
 	watchdogWaitBtn: document.getElementById( 'watchdog-wait-btn' ),
 	watchdogStopBtn: document.getElementById( 'watchdog-stop-btn' ),
+	poseProvider: document.getElementById( 'pose-provider' ),
 };
 
 let current = null; // { source, dir, file, title, entryOverride }
@@ -453,6 +454,90 @@ els.watchdogStopBtn.addEventListener( 'click', () => {
 
 } );
 
+// ── Pose input provider (work order §2) — posecaster is a SIBLING frame at
+// its own origin, never inside the game sandbox: camera pixels stay at that
+// origin, this host only ever relays landmark NUMBERS into the sandbox as
+// ordinary strata:input data. Set to null/'' to disable the provider
+// entirely on this host (a game declaring `requires:['input:pose']` then
+// shows the same clear "unavailable" message as a missing label).
+const POSE_PROVIDER_ORIGIN = 'https://posecaster.com';
+const AVAILABLE_PROVIDERS = POSE_PROVIDER_ORIGIN ? [ 'pose' ] : [];
+
+const MAX_LANDMARKS_PER_GROUP = 256; // generous vs. any real pose/hand/face topology — just a sanity cap, never a silent truncation in normal use
+
+function isValidLandmarkArray( arr ) {
+
+	if ( ! Array.isArray( arr ) || arr.length > MAX_LANDMARKS_PER_GROUP ) return false;
+	return arr.every( ( lm ) => lm && typeof lm === 'object'
+		&& typeof lm.name === 'string'
+		&& typeof lm.x === 'number' && typeof lm.y === 'number' && typeof lm.z === 'number'
+		&& typeof lm.score === 'number' );
+
+}
+
+// Shape-validate before relaying anything into the sandbox — numbers only,
+// bounded array lengths, nothing resembling a blob/image ever passed through
+// (posecaster's own out=postmessage mode never sends one, but the host never
+// just trusts that from across an origin boundary either).
+function isValidLandmarkFrame( frame ) {
+
+	if ( ! frame || typeof frame !== 'object' || typeof frame.t !== 'number' ) return false;
+	if ( ! isValidLandmarkArray( frame.pose ) ) return false;
+	if ( frame.hands !== undefined ) {
+
+		if ( ! frame.hands || typeof frame.hands !== 'object' ) return false;
+		if ( frame.hands.left !== undefined && ! isValidLandmarkArray( frame.hands.left ) ) return false;
+		if ( frame.hands.right !== undefined && ! isValidLandmarkArray( frame.hands.right ) ) return false;
+
+	}
+	if ( frame.face !== undefined && ! isValidLandmarkArray( frame.face ) ) return false;
+	return true;
+
+}
+
+let poseProviderActive = false;
+let onPoseMessage = null;
+
+// Lazy: no src, no camera permission, no indicator — until a loaded game
+// actually asks (via the sandbox's own `strata:activate-provider`, sent only
+// once its `requires` validation confirms it wants 'input:pose').
+function activatePoseProvider() {
+
+	if ( ! POSE_PROVIDER_ORIGIN || poseProviderActive ) return;
+	poseProviderActive = true;
+
+	const target = encodeURIComponent( window.location.origin );
+	els.poseProvider.src = `${ POSE_PROVIDER_ORIGIN }/models/pose/index.html#out=postmessage&target=${ target }`;
+	els.poseProvider.hidden = false;
+
+	onPoseMessage = ( event ) => {
+
+		// Only the posecaster frame itself, only its own origin — shape alone
+		// is never trusted across an origin boundary (work order §4#3).
+		if ( event.source !== els.poseProvider.contentWindow || event.origin !== POSE_PROVIDER_ORIGIN ) return;
+		const msg = event.data;
+		if ( ! msg || msg.type !== 'posecaster:landmarks' || ! isValidLandmarkFrame( msg.frame ) ) return;
+
+		els.iframe.contentWindow?.postMessage( { type: 'strata:input', provider: 'pose', channel: 'default', data: msg.frame }, '*' );
+
+	};
+	window.addEventListener( 'message', onPoseMessage );
+
+}
+
+// Torn down on every new game load (bootSandbox) so a game that doesn't ask
+// for pose never keeps a camera stream running from whatever game loaded
+// before it.
+function deactivatePoseProvider() {
+
+	if ( ! poseProviderActive ) return;
+	poseProviderActive = false;
+	if ( onPoseMessage ) { window.removeEventListener( 'message', onPoseMessage ); onPoseMessage = null; }
+	els.poseProvider.src = '';
+	els.poseProvider.hidden = true;
+
+}
+
 // ── Sandbox lifecycle (postMessage handshake) ────────────────────────────────
 // The sandbox posts 'strata:ready' the instant its own listener is attached
 // (before it does any loading), so the host never races a postMessage against
@@ -462,6 +547,7 @@ function bootSandbox( loaded ) {
 
 	current = loaded;
 	disarmWatchdog(); // re-armed on this game's own first heartbeat, not the previous game's leftover timestamp
+	deactivatePoseProvider(); // re-activated only if THIS game's own requires check asks for it
 	updateChromeFor( loaded );
 	showOverlay( 'Loading game…' );
 	renderSettingsPanel( [], null, {} ); // clear the PREVIOUS game's Settings tab immediately — its own schema (if any) arrives once loadGame() gets far enough
@@ -484,8 +570,16 @@ function bootSandbox( loaded ) {
 				file: loaded.file,
 				logic: loaded.logic, // &logic= override (work order §1); undefined for a bundled local example or a basename-paired repo load
 				entryOverride: loaded.entryOverride, // set by the menu's Code-tab Save action; undefined otherwise (fetch as normal)
+				providers: AVAILABLE_PROVIDERS, // which input providers THIS host has configured — the sandbox validates a game's `requires:['input:X']` against this
 				muted,
 			}, '*' );
+
+		} else if ( msg.type === 'strata:activate-provider' ) {
+
+			// The sandbox only ever sends this once its own requires validation
+			// confirms the loaded game actually wants this provider — never
+			// eager, never for a game that doesn't ask.
+			if ( msg.provider === 'pose' ) activatePoseProvider();
 
 		} else if ( msg.type === 'strata:loaded' ) {
 
@@ -565,6 +659,7 @@ function hotReloadGame() {
 		file: current.file,
 		logic: current.logic,
 		entryOverride: current.entryOverride,
+		providers: AVAILABLE_PROVIDERS,
 		muted,
 	}, '*' );
 

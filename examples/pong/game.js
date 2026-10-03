@@ -3,21 +3,38 @@
 // wiring (Court/Wall * -> .static, Player/AIPaddle -> .kinematic, Ball ->
 // .dynamic with CCD) — this file is just input, a ~5-line AI follow, and
 // score/reset, same as any game written against the plain ctx contract.
+//
+// §2 of the "one logic, many scenes" work order: every court/paddle/ball
+// dimension below is DERIVED from the loaded scene's own labelled bounds
+// (Box3().setFromObject — same pattern examples/bubbles already used), never
+// hardcoded, so this SAME file also drives a differently-sized court with no
+// changes — the proof that "one logic, many scenes" is real, not just
+// claimed. `requires` lets the host validate a scene is actually compatible
+// before init() ever runs, instead of a silent dead canvas.
+
+export const requires = [ '#Court', '#PlayerPaddle', '#AIPaddle', '#Ball' ];
 
 export default function init( ctx ) {
 
-	const { $S, input, onFrame, onReset, state, getBody } = ctx;
+	const { THREE, $S, input, onFrame, onReset, state, getBody } = ctx;
 
+	const court = $S( '#Court' ).toArray()[ 0 ];
 	const player = $S( '#PlayerPaddle' ).toArray()[ 0 ];
 	const ai = $S( '#AIPaddle' ).toArray()[ 0 ];
 	const ball = $S( '#Ball' ).toArray()[ 0 ];
 	const ballBody = getBody( ball );
 
-	const HALF_WIDTH = 2.5;      // paddle travel clamp along X
-	const PLAYER_SPEED = 5;      // units/sec
+	const courtBox = new THREE.Box3().setFromObject( court );
+	const paddleSize = new THREE.Box3().setFromObject( player ).getSize( new THREE.Vector3() );
+	const ballRadius = new THREE.Box3().setFromObject( ball ).getSize( new THREE.Vector3() ).x / 2;
+
+	const HALF_WIDTH = courtBox.max.x - paddleSize.x / 2; // paddle travel clamp along X — stops exactly at the walls
+	const PLAYER_SPEED = 5;      // units/sec — gameplay pacing, not a scene dimension, stays authored
 	const AI_SPEED = 2.6;        // capped below the player's — beatable
 	const SERVE_SPEED = 3.5;
-	const OUT_OF_BOUNDS_Z = 5.2; // just past each paddle's Z plane
+	// Just past each paddle's OWN far edge (its Z position + half-depth) plus
+	// a ball's width of clearance — scales with the scene, never hardcoded.
+	const OUT_OF_BOUNDS_Z = Math.abs( player.position.z ) + paddleSize.z / 2 + ballRadius * 2;
 
 	state.scorePlayer = 0;
 	state.scoreAI = 0;

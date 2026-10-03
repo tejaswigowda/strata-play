@@ -51,6 +51,14 @@
 	@keyframes spin { to { transform: rotate(360deg); } }
 	#load-message { font-size: 12px; opacity: 0.75; }
 
+	#watchdog-overlay {
+		position: absolute; inset: 0; z-index: 15; display: flex; flex-direction: column; align-items: center; justify-content: center;
+		gap: 12px; background: rgba(10,10,12,0.85); text-align: center; padding: 24px;
+	}
+	#watchdog-overlay[hidden] { display: none; }
+	#watchdog-overlay p { margin: 0; font-size: 13px; max-width: 320px; }
+	#watchdog-overlay .row { display: flex; gap: 8px; }
+
 	#menu-overlay {
 		position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
 		background: rgba(6,6,8,0.75);
@@ -163,6 +171,22 @@
 		<div id="load-overlay">
 			<div class="spinner"></div>
 			<div id="load-message">Loading…</div>
+		</div>
+
+		<!--
+			Work order §4.2 — the sandbox isolates REACH, never COMPUTE: a hung
+			loop or runaway spawn inside a game can still wedge this thread, which
+			no CSP/origin boundary prevents. play.js tracks a 'strata:heartbeat'
+			posted every frame from inside the sandbox's own render loop; if it
+			stops for a few seconds, this surfaces instead of a tab that's just
+			silently gone unresponsive with no way out.
+		-->
+		<div id="watchdog-overlay" hidden>
+			<p>This game stopped responding. Stop it?</p>
+			<div class="row">
+				<button id="watchdog-wait-btn">Keep waiting</button>
+				<button id="watchdog-stop-btn">Stop game</button>
+			</div>
 		</div>
 
 		<div id="menu-overlay" hidden>

@@ -86,6 +86,9 @@ const els = {
 	menuCodeSaveBtn: document.getElementById( 'menu-code-save-btn' ),
 	menuSettingsEmpty: document.getElementById( 'menu-settings-empty' ),
 	menuSettingsList: document.getElementById( 'menu-settings-list' ),
+	watchdogOverlay: document.getElementById( 'watchdog-overlay' ),
+	watchdogWaitBtn: document.getElementById( 'watchdog-wait-btn' ),
+	watchdogStopBtn: document.getElementById( 'watchdog-stop-btn' ),
 };
 
 let current = null; // { source, dir, file, title, entryOverride }
@@ -195,7 +198,12 @@ function renderSettingsPanel( schema, key, values ) {
 
 // ── Hash parsing ───────────────────────────────────────────────────────────
 // #repo=<owner>/<repo>[@ref]&file=<path>[&branch=<branch>][&commit=<sha|tag>]
-// [&present=true|preview=true] — identical param names/precedence to
+// [&logic=<path>.js][&present=true|preview=true] — identical param
+// names/precedence to strata-editor's loadSceneFromHash (Menubar.Git.js) for
+// repo/file/branch/commit/present; &logic= is this project's own addition
+// (work order §1) — an explicit override for which logic module drives the
+// loaded scene, winning over the scene's own `extras["strata:logic"]`, which
+// in turn wins over the basename default. identical param names/precedence to
 // strata-editor's loadSceneFromHash (Menubar.Git.js): &commit= wins over
 // &branch=, which wins over an "@ref" on repo=, which wins over nothing
 // (try 'main' then 'master').
@@ -230,6 +238,7 @@ function parseHash() {
 		repo: parsed.repo,
 		ref: commitParam || branchParam || repoRef || null,
 		file,
+		logic: params.get( 'logic' ) || null,
 		mode: present ? 'present' : 'authoring',
 	};
 
@@ -302,6 +311,7 @@ function resolveGitSource( hashSource ) {
 	return {
 		source: { kind: 'git', owner: hashSource.owner, repo: hashSource.repo, ref: hashSource.ref, mode: hashSource.mode },
 		file: hashSource.file,
+		logic: hashSource.logic || null,
 		dir: dirOf( hashSource.file ),
 		title: titleFromFile( hashSource.file ),
 	};
@@ -365,6 +375,84 @@ function updateChromeFor( loaded ) {
 
 }
 
+// ── Resource watchdog (work order §4.2) ───────────────────────────────────────
+// The sandbox's origin isolation stops a game reaching anything it shouldn't
+// (§4.1's CSP, the iframe boundary) — it does nothing about a game wedging
+// its OWN thread (a hung loop, a runaway spawn, a mining script). The sandbox
+// posts a 'strata:heartbeat' every frame from inside its own render loop
+// (sandbox.html); if one hasn't arrived in WATCHDOG_TIMEOUT_MS, the game's
+// thread is presumed blocked and this surfaces an exit the player otherwise
+// wouldn't have — this can't force the browser to reclaim CPU/GPU (no API
+// does, from a page), it just gives a stuck game a "stop it" instead of a
+// tab that's silently gone unresponsive forever.
+const WATCHDOG_TIMEOUT_MS = 5000;
+const WATCHDOG_CHECK_INTERVAL_MS = 1000;
+
+let lastHeartbeatAt = 0;
+let watchdogArmed = false; // false during the brief load window before a game's first-ever heartbeat — never flags normal loading as "hung"
+let watchdogTripped = false;
+
+function armWatchdog() {
+
+	lastHeartbeatAt = Date.now();
+	watchdogArmed = true;
+	// Deliberately does NOT auto-hide an already-tripped prompt — a game that
+	// demonstrably stalled recovering on its own right as the player reads
+	// this shouldn't silently erase that it happened; only an explicit Keep
+	// waiting/Stop (or a genuinely NEW game loading, via disarmWatchdog)
+	// clears it.
+
+}
+
+function disarmWatchdog() {
+
+	watchdogArmed = false;
+	hideWatchdogPrompt();
+
+}
+
+function showWatchdogPrompt() {
+
+	if ( watchdogTripped ) return;
+	watchdogTripped = true;
+	els.watchdogOverlay.hidden = false;
+
+}
+
+function hideWatchdogPrompt() {
+
+	watchdogTripped = false;
+	els.watchdogOverlay.hidden = true;
+
+}
+
+setInterval( () => {
+
+	if ( ! watchdogArmed ) return;
+	if ( Date.now() - lastHeartbeatAt > WATCHDOG_TIMEOUT_MS ) showWatchdogPrompt();
+
+}, WATCHDOG_CHECK_INTERVAL_MS );
+
+els.watchdogWaitBtn.addEventListener( 'click', () => {
+
+	// Not a real fix (the thread is still however blocked it was) — just
+	// gives it more rope before asking again, for a game that's merely slow
+	// (a big one-time asset decode, say) rather than genuinely hung.
+	lastHeartbeatAt = Date.now();
+	hideWatchdogPrompt();
+
+} );
+
+els.watchdogStopBtn.addEventListener( 'click', () => {
+
+	disarmWatchdog();
+	if ( els.iframe._strataCleanup ) els.iframe._strataCleanup();
+	els.iframe.src = 'about:blank';
+	hideOverlay();
+	setStatus( 'Game stopped — it stopped responding.' );
+
+} );
+
 // ── Sandbox lifecycle (postMessage handshake) ────────────────────────────────
 // The sandbox posts 'strata:ready' the instant its own listener is attached
 // (before it does any loading), so the host never races a postMessage against
@@ -373,6 +461,7 @@ function updateChromeFor( loaded ) {
 function bootSandbox( loaded ) {
 
 	current = loaded;
+	disarmWatchdog(); // re-armed on this game's own first heartbeat, not the previous game's leftover timestamp
 	updateChromeFor( loaded );
 	showOverlay( 'Loading game…' );
 	renderSettingsPanel( [], null, {} ); // clear the PREVIOUS game's Settings tab immediately — its own schema (if any) arrives once loadGame() gets far enough
@@ -383,12 +472,17 @@ function bootSandbox( loaded ) {
 		const msg = event.data;
 		if ( ! msg || typeof msg !== 'object' ) return;
 
-		if ( msg.type === 'strata:ready' ) {
+		if ( msg.type === 'strata:heartbeat' ) {
+
+			armWatchdog();
+
+		} else if ( msg.type === 'strata:ready' ) {
 
 			els.iframe.contentWindow.postMessage( {
 				type: 'strata:init',
 				source: loaded.source,
 				file: loaded.file,
+				logic: loaded.logic, // &logic= override (work order §1); undefined for a bundled local example or a basename-paired repo load
 				entryOverride: loaded.entryOverride, // set by the menu's Code-tab Save action; undefined otherwise (fetch as normal)
 				muted,
 			}, '*' );
@@ -463,11 +557,13 @@ function restart() {
 function hotReloadGame() {
 
 	if ( ! current ) return;
+	hideWatchdogPrompt(); // the next heartbeat re-confirms liveness; no need to wait out the full timeout again
 	showOverlay( 'Reloading…' );
 	els.iframe.contentWindow?.postMessage( {
 		type: 'strata:init',
 		source: current.source,
 		file: current.file,
+		logic: current.logic,
 		entryOverride: current.entryOverride,
 		muted,
 	}, '*' );

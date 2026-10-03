@@ -49,13 +49,25 @@ http://127.0.0.1:5510/#repo=owner/repo&file=game.glb
 ## The URL scheme
 
 ```
-#repo=<owner>/<repo>[@ref]&file=<name>.glb[&commit=<sha|tag>][&present=true]
+#repo=<owner>/<repo>[@ref]&file=<name>.glb[&commit=<sha|tag>][&logic=<path>.js][&present=true]
 ```
 
 - `repo` — `owner/repo`, optionally with an `@ref` (branch/tag/commit SHA).
-- `file` — path to the game's scene **`.glb`** inside that repo. There is no
-  manifest file; the entry module is auto-resolved as the same path with a
-  `.js` extension (`file=levels/one.glb` → entry `levels/one.js`).
+- `file` — path to the game's scene **`.glb`** inside that repo.
+- `logic=` — (work order §1, "one logic, many scenes") explicitly picks which
+  entry module drives the loaded scene, instead of the basename default.
+  Normally a bare path, same-repo as the scene (`&logic=games/pong.js`); an
+  `owner/repo:path` form (`&logic=tejaswigowda/commons:pong.js`) MAY point at
+  a *different* repo entirely — a shared-logic commons — but only in that
+  explicit, repo-qualified form; a bare path never silently crosses repos.
+  Resolves through the exact same CDN resolver as everything else (never
+  `api.github.com`), regardless of which repo it names. Precedence, first
+  match wins: **(1)** this URL param, **(2)** the scene's own
+  `extras["strata:logic"]` (so a scene can self-declare its logic without
+  the URL ever needing `&logic=` at all — same "read off userData" mechanism
+  labels already use), **(3)** the basename default below. There is still no
+  separate manifest file — this is the SAME two-file contract, just with two
+  more ways to point at the second file.
 - `commit=` — wins over an `@ref` on `repo=` (accepts a branch, tag, or commit
   SHA — most-specific-wins; with neither given, tries `main` then `master`).
 - `present=true` (or `preview=true`) — prefer jsDelivr first (scale over
@@ -84,12 +96,34 @@ actually be a *game*.
 ## The game-repo contract
 
 A game repo is just **two files**: a scene `.glb`, and that scene's entry
-module — **always the scene's own basename with a `.js` extension**
-(`game.glb` → `game.js`), auto-resolved, never authored as a separate field.
-There is no manifest: `physics` is auto-detected from whether the scene's own
-labels ask for any (see [label → physics body vocabulary](#label--physics-body-vocabulary)
+module — resolved per the precedence above (an explicit `&logic=`, the
+scene's own `extras["strata:logic"]`, or the basename default
+`game.glb` → `game.js`). There is no manifest: `physics` is auto-detected from
+whether the scene's own labels ask for any (see [label → physics body vocabulary](#label--physics-body-vocabulary)
 below) — a scene with none of those classes never pays for cannon-es. Runtime
 versions are always the host's pinned defaults (see "Pinned runtime stack").
+
+### The label contract — one logic, many scenes (work order §2)
+
+The whole point of resolving logic separately from the scene is that ONE
+entry module can drive many different, differently-sized/skinned scenes —
+proven by `examples/pong/game.js`, which derives every court/paddle/ball
+dimension from the loaded scene's own labelled bounds
+(`Box3().setFromObject($S('#Court'))`, etc.) rather than hardcoding them, the
+same pattern `examples/bubbles` already used. For this to be safe (not a
+silent dead canvas when a scene and a logic module don't actually match), a
+module may export its own required-label contract alongside `init`:
+
+```js
+export const requires = [ '#Ball', '#Table', '#PlayerPaddle', '#AIPaddle' ];
+```
+
+The host validates every selector in `requires` against the JUST-LOADED scene
+**before** calling `init(ctx)` — a scene missing any of them fails with a
+clear, named message (`this scene can't run games/pong.js — missing #Ball`)
+instead of three steps of silent nothing happening once the game's own code
+runs. `requires` is optional; a module with none skips this check entirely
+(same opt-in spirit as `config.settings`).
 
 ### The `init(ctx)` contract — the whole game API
 
@@ -149,16 +183,44 @@ The token never enters the iframe, so a shared game link cannot exfiltrate it.
 host's `localStorage`, then confirms code evaluated inside the sandbox frame
 gets a thrown/blocked access for both `localStorage` and `window.parent.document`.
 `test/redteam.spec.mjs` goes further — it runs the bundled `#example=redteam`
-hostile game and confirms all five of the security work order's red-team
+hostile game and confirms all six of the security work order's red-team
 attacks fail: reading the token, this frame's own storage, `window.parent`'s
 DOM, a top-frame navigation, a direct `api.github.com` call (CSP-blocked, see
-below), and a forged `strata:save` outside the game's own repo scope.
+below), a forged `strata:save` outside the game's own repo scope, and an
+`<img>`-tag exfiltration beacon (also CSP-blocked — work order §4.1).
 
 A Content-Security-Policy on `sandbox.html` adds defense-in-depth on top of
-origin isolation: `connect-src` lists only the two CDN hosts `git-resolver.js`
-ever talks to (jsDelivr, raw.githubusercontent.com) — not `api.github.com`, so
-a malicious game's direct API call is refused at the network layer, not just
-left tokenless.
+origin isolation — **every** fetch-capable directive is listed explicitly
+(never left to the `default-src 'none'` fallback, so the policy's actual
+reach is auditable at a glance): `script-src`, `connect-src`, `img-src`,
+`media-src`, `font-src`, `style-src` allow only `'self'`/`data:`/`blob:` plus
+the two CDN hosts `git-resolver.js` ever talks to (jsDelivr,
+raw.githubusercontent.com) — not `api.github.com`, so a malicious game's
+direct API call is refused at the network layer, not just left tokenless.
+`frame-src`, `form-action`, `base-uri`, `object-src` stay `'none'` outright — a
+sandboxed game never legitimately opens a frame, submits a form, or changes
+its own base/plugin surface.
+
+### Resource watchdog (work order §4.2)
+
+Origin isolation and the CSP above stop a game reaching anything it
+shouldn't — neither stops it wedging its OWN thread (a hung loop, a runaway
+spawn, a mining script); no in-page API can forcibly reclaim CPU/GPU from a
+script that's already running. The sandbox posts a `strata:heartbeat` every
+frame from inside its own render loop; `play.js` tracks the gap since the
+last one, and if it exceeds `WATCHDOG_TIMEOUT_MS` (5s), surfaces "This game
+stopped responding. Stop it?" with Stop (tears the sandbox down via a
+destructive `iframe.src` reassignment — never needs the hung script's
+cooperation) and Keep waiting (gives it more time, for a merely-slow game
+rather than a genuinely hung one) — see `test/watchdog.spec.mjs`, which
+verifies this against a deliberately hung bundled example
+(`examples/hung/game.js`). This only works because the sandboxed iframe gets
+its OWN renderer process — verified necessary directly: without Chromium's
+`--site-per-process` (see `playwright.config.mjs`), a hung game's busy-loop
+was observed blocking the HOST page's own JS too, defeating the watchdog
+entirely. A production deployment relies on the browser's own default site
+isolation behavior for a genuinely cross-origin (opaque) iframe; this flag is
+only needed to force the same behavior inside Playwright's own test launch.
 
 ## Pinned runtime stack (`sandbox.html`)
 
@@ -272,20 +334,31 @@ would otherwise overwrite `userData.classes` with its own auto-derived set).
 ## Repo layout
 
 ```
-docs/index.html              host shell (trusted): hash parse, chrome, hosts the sandbox iframe
-docs/play.js                  host-side controller: hash/menu load, wire the sandbox, fork, save-validation
-docs/sandbox.html             the UNTRUSTED frame: CSP, pinned importmap, inlined harness + game boot
-docs/lib/git-resolver.js      vendored, unchanged, from strata-editor — the CDN resolver (host-side)
-docs/lib/git-host.js          host-only: token storage, parseRepo, fork (adapted from strata-editor)
-server.js                    dev static server — serves docs/ as its web root
-examples/hello/             seed example — 3 coins + a door, the smoke test (game.glb + game.js)
-examples/pong/              work order §7 — labels-driven physics, input, AI, score/reset
-examples/redteam/           work order §1.5 — the five sandbox attacks, all expected to fail
-scripts/embed-examples.mjs  regenerates docs/sandbox.html's embedded copy of every example's game.glb/game.js
-test/play.spec.mjs          Playwright: hello example — selectors/state, and the security proof
-test/redteam.spec.mjs       Playwright: §1.5 red-team acceptance (all five attacks fail)
-test/pong.spec.mjs          Playwright: §7 Pong acceptance (criteria 1-5; see honesty ledger below)
+docs/index.html               host shell (trusted): hash parse, chrome, hosts the sandbox iframe + watchdog prompt
+docs/play.js                   host-side controller: hash/menu load, wire the sandbox, fork, save-validation, resource watchdog
+docs/sandbox.html              the UNTRUSTED frame: CSP, pinned importmap, inlined harness + game boot, logic resolution + label-contract check
+docs/lib/git-resolver.js       vendored, unchanged, from strata-editor — the CDN resolver (host-side)
+docs/lib/git-host.js           host-only: token storage, parseRepo, fork (adapted from strata-editor)
+server.js                     dev static server — serves docs/ as its web root
+examples/hello/               seed example — 3 coins + a door, the smoke test (game.glb + game.js)
+examples/pong/                work order §7/§2 — labels-driven physics, scene-derived dimensions (one logic, many scenes), input, AI, score/reset
+examples/redteam/             work order §1.5/§4.1 — the six sandbox attacks, all expected to fail
+examples/hung/                work order §4.2 — deliberately wedges its own thread; proves the resource watchdog
+scripts/embed-examples.mjs    regenerates docs/sandbox.html's embedded copy of every example's game.glb/game.js
+test/play.spec.mjs            Playwright: hello example — selectors/state, and the security proof
+test/redteam.spec.mjs         Playwright: §1.5/§4.1 red-team acceptance (all six attacks fail)
+test/pong.spec.mjs            Playwright: §7 Pong acceptance (criteria 1-5; see honesty ledger below)
+test/watchdog.spec.mjs        Playwright: §4.2 resource-watchdog acceptance (a hung game trips it, Stop tears it down)
 ```
+
+A content repo (a real `#repo=owner/repo` game, not this repo's own bundled
+examples) is free to lay itself out as `games/<name>.js` (shared logic) +
+`scenes/<game>/<variant>.glb` (skins/variants) + `levels/<pack>/<n>.glb`
+(levels/maps whose labels carry more structure) — logic separated from
+content, with `&logic=`/`extras["strata:logic"]` (see "The URL scheme") doing
+the pointing. strata-play itself enforces none of this layout (no manifest,
+no naming convention beyond basename-pairing as the DEFAULT) — it's a content
+convention this platform feature makes possible, not a requirement.
 
 Everything under `docs/` is what a browser fetches; `examples/`, `scripts/`,
 `test/` and `server.js` are dev-only and never served to a game.

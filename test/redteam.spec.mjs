@@ -24,10 +24,11 @@ test( 'red-team: all five attacks fail', async ( { page } ) => {
 
 	// forgedSave/githubApi resolve asynchronously (a postMessage round trip and
 	// a network attempt respectively) — poll until neither is still "pending".
+	// imgBeacon resolves via a securitypolicyviolation event, same idea.
 	await expect.poll( async () => {
 
 		const s = await frame.evaluate( () => window.STRATA_CTX && window.STRATA_CTX.state.redteam );
-		return s && s.forgedSave !== 'pending' && s.githubApi !== 'pending';
+		return s && s.forgedSave !== 'pending' && s.githubApi !== 'pending' && s.imgBeacon !== 'pending';
 
 	}, { timeout: 5000 } ).toBe( true );
 
@@ -46,5 +47,7 @@ test( 'red-team: all five attacks fail', async ( { page } ) => {
 	// 5. Forge a "save" outside the game's own repo scope.
 	expect( redteam.forgedSave ).toBe( 'rejected' );
 	expect( redteam.forgedSaveReason ).toMatch( /scope|invalid/i );
+	// 6. Exfiltrate via an <img> beacon — full-CSP hardening (work order §4.1).
+	expect( redteam.imgBeacon ).toBe( 'blocked' );
 
 } );

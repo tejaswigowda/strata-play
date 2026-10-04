@@ -13,14 +13,15 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/dialog/dialog.min.css">
 <!--
-	Pose-input-provider work order §2.1 — scoped, minimal, additive: this is
-	the FIRST (and only) CSP this page has ever had, and it constrains just
+	Input-provider work order §2.1 — scoped, minimal, additive: this is the
+	FIRST (and only) CSP this page has ever had, and it constrains just
 	frame-src (no default-src, so every other directive stays exactly as
 	unrestricted as before — this is not a general host-page lockdown, that's
 	a separate concern). posecaster.com is an explicit allowlist ADDITION for
-	the pose input provider (sibling frame, §2) — the GAME sandbox's own CSP
-	(sandbox.html) is untouched and still locks frame-src to 'none'; this
-	page embeds posecaster directly, the game never does.
+	input providers (pose/hands/face/facemesh/holistic, all one origin,
+	sibling frame, §2) — the GAME sandbox's own CSP (sandbox.html) is
+	untouched and still locks frame-src to 'none'; this page embeds
+	posecaster directly, the game never does.
 -->
 <meta http-equiv="Content-Security-Policy" content="frame-src 'self' https://posecaster.com;">
 <style>
@@ -45,11 +46,11 @@
 	.stage { position: relative; width: 100%; height: calc(100% - 41px); background: #000; }
 	.stage:fullscreen { height: 100%; }
 	#sandbox { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
-	#pose-provider {
+	#input-provider {
 		position: absolute; right: 10px; bottom: 10px; width: 160px; height: 120px; border: 1px solid #2c2c33;
 		border-radius: 8px; z-index: 5; background: #000;
 	}
-	#pose-provider[hidden] { display: none; }
+	#input-provider[hidden] { display: none; }
 
 	#load-overlay {
 		position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -185,16 +186,17 @@
 		<iframe id="sandbox" sandbox="allow-scripts" allow="xr-spatial-tracking" title="Strata game"></iframe>
 
 		<!--
-			Pose input provider (work order §2) — a SIBLING frame at its own
+			Input provider (work order §2) — a SIBLING frame at its own
 			origin, never inside the game sandbox above: camera pixels never leave
 			this frame, the game only ever sees landmark numbers relayed through
 			play.js. `src` stays empty (no camera permission requested, no camera
 			indicator shown) until a loaded game actually declares
-			`requires: ['input:pose']` — see activatePoseProvider() in play.js.
+			`requires: ['input:X']` for one of posecaster's models (pose, hands,
+			face, facemesh, holistic) — see activateProvider() in play.js.
 			Small visible corner preview by default (not hidden) — an active
 			camera should never be invisible to the player.
 		-->
-		<iframe id="pose-provider" allow="camera" title="Pose input provider" hidden></iframe>
+		<iframe id="input-provider" allow="camera" title="Input provider" hidden></iframe>
 
 		<div id="load-overlay">
 			<div class="spinner"></div>

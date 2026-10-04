@@ -128,13 +128,13 @@ runs. `requires` is optional; a module with none skips this check entirely
 An `'input:X'` entry in `requires` (e.g. `'input:pose'`) asks for a named
 **input provider** instead of a scene label — see "Input providers" below.
 
-### Input providers — label-addressable camera/pose input, never the raw camera
+### Input providers — label-addressable camera/pose/face input, never the raw camera
 
-A provider is a sibling-frame input source (e.g. body pose from
-[posecaster](https://posecaster.com/)) that the HOST — never the game — owns
-and relays as plain numbers. The load-bearing property: **the camera never
-enters the game sandbox.** Pixels stay inside posecaster's own iframe; the
-game only ever sees landmark numbers via `ctx.input`/`ctx.onPose`.
+A provider is a sibling-frame input source — any of posecaster's 5 models
+(`pose`, `hands`, `face`, `facemesh`, `holistic`) — that the HOST, never the
+game, owns and relays as plain numbers. The load-bearing property: **the
+camera never enters the game sandbox.** Pixels stay inside posecaster's own
+iframe; the game only ever sees landmark numbers via `ctx.input`/`ctx.onPose`.
 
 ```js
 export const requires = [ '#RightShoulder', '#LeftShoulder', 'input:pose' ];
@@ -150,21 +150,36 @@ export default function init( ctx ) {
 ```
 
 - `ctx.input.on( provider, fn )` subscribes to any named provider's latest
-  sample; `ctx.onPose( fn )` is sugar for `ctx.input.on( 'pose', fn )`.
-  `ctx.input.pose()` reads the latest sample synchronously (or `null` before
-  the first frame arrives).
-- Declaring `'input:pose'` in `requires` is what makes the host actually open
-  the provider — lazily, on demand, and only for a loaded game that asks for
-  it (`docs/index.html`'s `#pose-provider` iframe stays `hidden`, `src`-less,
-  with no camera permission, until then).
-- See `examples/posepuppet/` for a full worked example: a simple rigged
-  figure whose `#RightShoulder`/`#LeftShoulder` bones aim themselves at the
-  live shoulder→wrist landmark direction each frame — moving in front of the
-  camera visibly swings the arm.
+  sample; `ctx.onPose`/`ctx.onHands`/`ctx.onFace`/`ctx.onFacemesh`/
+  `ctx.onHolistic` are sugar for `ctx.input.on( '<name>', fn )`.
+  `ctx.input.pose()` (and the matching `.hands()`/`.face()`/`.facemesh()`/
+  `.holistic()`) reads the latest sample synchronously, or `null` before the
+  first frame arrives.
+- Declaring `'input:<name>'` in `requires` is what makes the host actually
+  open that provider — lazily, on demand, and only for a loaded game that
+  asks for it (`docs/index.html`'s `#input-provider` iframe stays `hidden`,
+  `src`-less, with no camera permission, until then).
+- Frame shape by provider: `pose` → `frame.pose` (33 named BlazePose
+  landmarks); `hands` → `frame.hands.left`/`.right` (21 points each, numeric
+  names); `facemesh`/`holistic` → `frame.face` (full mesh, numeric names);
+  `face` (short-range detection — the simplest, cheapest one, good for "where
+  is the face" rather than a full mesh) → `frame.face` with 6 named keypoints
+  (`face_rightEye`, `face_leftEye`, `face_noseTip`, `face_mouthCenter`,
+  `face_rightEarTragion`, `face_leftEarTragion`) plus a synthetic
+  `face_faceCenter` (the detection's own bounding-box center — the single
+  easiest point to drive a 1D control like a paddle from).
+- See `examples/posepuppet/` (`input:pose`) for a rigged-figure demo — simple
+  bones aim themselves at the live shoulder→wrist landmark direction each
+  frame, moving in front of the camera visibly swings the arm — and
+  `examples/pong/` (`input:face`) for a 1D demo: leaning left/right in front
+  of the camera directly positions the player paddle (keyboard/touch control
+  still works right up until the first face frame arrives, same file either
+  way — see its own header comment).
 - Architecture: `docs/index.html` embeds posecaster
-  (`https://posecaster.com/models/pose/index.html#out=postmessage&target=…`)
-  as a frame **sibling to**, never a child of, the game sandbox — explicitly
-  allowlisted via a new, narrowly-scoped CSP (`frame-src 'self'
+  (`https://posecaster.com/#model=<name>&embed=true&out=postmessage&target=…`
+  — posecaster's own top-level hash router, one origin for all 5 models) as
+  a frame **sibling to**, never a child of, the game sandbox — explicitly
+  allowlisted via a narrowly-scoped CSP (`frame-src 'self'
   https://posecaster.com;`, no `default-src`, every other directive
   untouched). `docs/play.js` validates every posted frame's origin+shape
   before relaying it into the sandbox as an ordinary `strata:input` message;
@@ -173,7 +188,12 @@ export default function init( ctx ) {
   also defeats a self-posted forgery from inside the game's own sandbox
   (`event.source === window` there, not `window.parent`). The game sandbox's
   own `allow`/`connect-src` are untouched by any of this — no camera
-  permission, no new egress, ever, for the sandbox itself.
+  permission, no new egress, ever, for the sandbox itself. (posecaster's own
+  top-level page wraps each model page in one more iframe of its own —
+  `play.js`'s identity check accounts for that extra hop, matching against
+  `event.source.parent` rather than `event.source` directly; posecaster's own
+  `postLandmarksIfEnabled` posts via `window.top`, not `window.parent`, for
+  the same reason — see that function's own comment.)
 - posecaster's own `out=postmessage&target=<origin>` mode (added upstream,
   see [posecaster/posecaster](https://github.com/posecaster/posecaster)) is
   purely additive and fails closed: no/malformed `target` posts nothing, and

@@ -89,7 +89,7 @@ const els = {
 	watchdogOverlay: document.getElementById( 'watchdog-overlay' ),
 	watchdogWaitBtn: document.getElementById( 'watchdog-wait-btn' ),
 	watchdogStopBtn: document.getElementById( 'watchdog-stop-btn' ),
-	poseProvider: document.getElementById( 'pose-provider' ),
+	inputProvider: document.getElementById( 'input-provider' ),
 };
 
 let current = null; // { source, dir, file, title, entryOverride }
@@ -454,14 +454,18 @@ els.watchdogStopBtn.addEventListener( 'click', () => {
 
 } );
 
-// ── Pose input provider (work order §2) — posecaster is a SIBLING frame at
-// its own origin, never inside the game sandbox: camera pixels stay at that
+// ── Input providers (work order §2) — posecaster is a SIBLING frame at its
+// own origin, never inside the game sandbox: camera pixels stay at that
 // origin, this host only ever relays landmark NUMBERS into the sandbox as
-// ordinary strata:input data. Set to null/'' to disable the provider
-// entirely on this host (a game declaring `requires:['input:pose']` then
-// shows the same clear "unavailable" message as a missing label).
+// ordinary strata:input data. posecaster hosts 5 models at one origin,
+// selected via its own `#model=<name>` hash — `requires:['input:X']` in a
+// game asks for whichever one it needs. Set POSE_PROVIDER_ORIGIN to null/''
+// to disable every provider on this host (a game declaring `requires` on any
+// of them then shows the same clear "unavailable" message as a missing
+// label).
 const POSE_PROVIDER_ORIGIN = 'https://posecaster.com';
-const AVAILABLE_PROVIDERS = POSE_PROVIDER_ORIGIN ? [ 'pose' ] : [];
+const VALID_PROVIDERS = [ 'pose', 'hands', 'face', 'facemesh', 'holistic' ]; // == posecaster's own model names, 1:1
+const AVAILABLE_PROVIDERS = POSE_PROVIDER_ORIGIN ? VALID_PROVIDERS : [];
 
 const MAX_LANDMARKS_PER_GROUP = 256; // generous vs. any real pose/hand/face topology — just a sanity cap, never a silent truncation in normal use
 
@@ -495,46 +499,53 @@ function isValidLandmarkFrame( frame ) {
 
 }
 
-let poseProviderActive = false;
-let onPoseMessage = null;
+let activeProvider = null; // one of VALID_PROVIDERS, or null
+let onProviderMessage = null;
 
 // Lazy: no src, no camera permission, no indicator — until a loaded game
 // actually asks (via the sandbox's own `strata:activate-provider`, sent only
-// once its `requires` validation confirms it wants 'input:pose').
-function activatePoseProvider() {
+// once its `requires` validation confirms it wants 'input:<provider>').
+function activateProvider( provider ) {
 
-	if ( ! POSE_PROVIDER_ORIGIN || poseProviderActive ) return;
-	poseProviderActive = true;
+	if ( ! POSE_PROVIDER_ORIGIN || ! VALID_PROVIDERS.includes( provider ) || activeProvider ) return;
+	activeProvider = provider;
 
 	const target = encodeURIComponent( window.location.origin );
-	els.poseProvider.src = `${ POSE_PROVIDER_ORIGIN }/models/pose/index.html#out=postmessage&target=${ target }`;
-	els.poseProvider.hidden = false;
+	els.inputProvider.src = `${ POSE_PROVIDER_ORIGIN }/#model=${ provider }&embed=true&out=postmessage&target=${ target }`;
+	els.inputProvider.hidden = false;
 
-	onPoseMessage = ( event ) => {
+	onProviderMessage = ( event ) => {
 
-		// Only the posecaster frame itself, only its own origin — shape alone
-		// is never trusted across an origin boundary (work order §4#3).
-		if ( event.source !== els.poseProvider.contentWindow || event.origin !== POSE_PROVIDER_ORIGIN ) return;
+		// posecaster's own top-level #model= routing (added upstream after
+		// this was first written) wraps the actual model page in ANOTHER
+		// iframe of its own — the real sender's `.source` is that innermost
+		// frame, a DIRECT CHILD of the one we embedded, not the embedded
+		// frame itself. `.parent` is one of the handful of properties the
+		// HTML spec allows reading cross-origin, so this still only accepts
+		// a message whose sender is (one level under) our OWN provider
+		// iframe — shape/origin alone is never trusted across an origin
+		// boundary either way (work order §4#3).
+		if ( event.source?.parent !== els.inputProvider.contentWindow || event.origin !== POSE_PROVIDER_ORIGIN ) return;
 		const msg = event.data;
 		if ( ! msg || msg.type !== 'posecaster:landmarks' || ! isValidLandmarkFrame( msg.frame ) ) return;
 
-		els.iframe.contentWindow?.postMessage( { type: 'strata:input', provider: 'pose', channel: 'default', data: msg.frame }, '*' );
+		els.iframe.contentWindow?.postMessage( { type: 'strata:input', provider: activeProvider, channel: 'default', data: msg.frame }, '*' );
 
 	};
-	window.addEventListener( 'message', onPoseMessage );
+	window.addEventListener( 'message', onProviderMessage );
 
 }
 
 // Torn down on every new game load (bootSandbox) so a game that doesn't ask
-// for pose never keeps a camera stream running from whatever game loaded
-// before it.
-function deactivatePoseProvider() {
+// for an input provider never keeps a camera stream running from whatever
+// game loaded before it.
+function deactivateProvider() {
 
-	if ( ! poseProviderActive ) return;
-	poseProviderActive = false;
-	if ( onPoseMessage ) { window.removeEventListener( 'message', onPoseMessage ); onPoseMessage = null; }
-	els.poseProvider.src = '';
-	els.poseProvider.hidden = true;
+	if ( ! activeProvider ) return;
+	activeProvider = null;
+	if ( onProviderMessage ) { window.removeEventListener( 'message', onProviderMessage ); onProviderMessage = null; }
+	els.inputProvider.src = '';
+	els.inputProvider.hidden = true;
 
 }
 
@@ -547,7 +558,7 @@ function bootSandbox( loaded ) {
 
 	current = loaded;
 	disarmWatchdog(); // re-armed on this game's own first heartbeat, not the previous game's leftover timestamp
-	deactivatePoseProvider(); // re-activated only if THIS game's own requires check asks for it
+	deactivateProvider(); // re-activated only if THIS game's own requires check asks for it
 	updateChromeFor( loaded );
 	showOverlay( 'Loading game…' );
 	renderSettingsPanel( [], null, {} ); // clear the PREVIOUS game's Settings tab immediately — its own schema (if any) arrives once loadGame() gets far enough
@@ -579,7 +590,7 @@ function bootSandbox( loaded ) {
 			// The sandbox only ever sends this once its own requires validation
 			// confirms the loaded game actually wants this provider — never
 			// eager, never for a game that doesn't ask.
-			if ( msg.provider === 'pose' ) activatePoseProvider();
+			activateProvider( msg.provider );
 
 		} else if ( msg.type === 'strata:loaded' ) {
 

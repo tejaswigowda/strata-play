@@ -29,6 +29,12 @@ export default defineConfig( {
 		// iframe's hang), defeating the entire point of the resource watchdog
 		// (work order §4.2) — the host needs a thread of its own to stay
 		// responsive while the untrusted game's doesn't.
-		launchOptions: { args: [ '--site-per-process' ] },
+		// Fake camera device + auto-grant: input-provider tests (and any game
+		// that declares requires:['input:X']) open a real posecaster iframe
+		// that calls getUserMedia — without a fake device, that call fails
+		// with NotSupportedError/console errors in this headless env even
+		// though it has nothing to do with the test itself.
+		launchOptions: { args: [ '--site-per-process', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream' ] },
+		permissions: [ 'camera' ],
 	},
 } );

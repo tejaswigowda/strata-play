@@ -11,8 +11,14 @@
 // changes — the proof that "one logic, many scenes" is real, not just
 // claimed. `requires` lets the host validate a scene is actually compatible
 // before init() ever runs, instead of a silent dead canvas.
+//
+// Input providers work order — 'input:face' adds posecaster's short-range
+// face-detection model as a SECOND way to move the player paddle (lean left/
+// right in front of the camera), layered on top of the original keyboard
+// control rather than replacing it: keyboard still works right up until the
+// first face frame arrives, same file either way.
 
-export const requires = [ '#Court', '#PlayerPaddle', '#AIPaddle', '#Ball' ];
+export const requires = [ '#Court', '#PlayerPaddle', '#AIPaddle', '#Ball', 'input:face' ];
 
 export default function init( ctx ) {
 
@@ -52,12 +58,33 @@ export default function init( ctx ) {
 
 	serve( true );
 
+	// Latest face-detection sample's normalized x (0=camera's left edge,
+	// 1=camera's right edge), or null until the first frame arrives — never
+	// mirrored, so leaning toward the camera's left moves the paddle toward
+	// -X, matching whichever edge the scene's own court labels its -X wall.
+	let latestFaceX = null;
+	ctx.onFace( ( frame ) => {
+
+		const c = frame.face && frame.face.find( ( lm ) => lm.name === 'face_faceCenter' );
+		if ( c ) latestFaceX = c.x;
+
+	} );
+
 	onFrame( ( dt ) => {
 
-		// Player input — arrow keys / A-D (a touch/pointer drag falls back to
-		// the SAME axis() call; see sandbox.html's makeInput).
-		const axis = input.axis( [ 'ArrowLeft', 'KeyA' ], [ 'ArrowRight', 'KeyD' ] );
-		player.position.x = Math.max( - HALF_WIDTH, Math.min( HALF_WIDTH, player.position.x + axis * PLAYER_SPEED * dt ) );
+		// Player input — face position (once available) takes over from
+		// keyboard/touch entirely, same clamp either way.
+		if ( latestFaceX !== null ) {
+
+			const target = ( latestFaceX - 0.5 ) * 2 * HALF_WIDTH;
+			player.position.x = Math.max( - HALF_WIDTH, Math.min( HALF_WIDTH, target ) );
+
+		} else {
+
+			const axis = input.axis( [ 'ArrowLeft', 'KeyA' ], [ 'ArrowRight', 'KeyD' ] );
+			player.position.x = Math.max( - HALF_WIDTH, Math.min( HALF_WIDTH, player.position.x + axis * PLAYER_SPEED * dt ) );
+
+		}
 
 		// AI: lerp toward the ball, clamped + speed-capped (beatable). No ML.
 		const diff = ball.position.x - ai.position.x;

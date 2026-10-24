@@ -418,7 +418,29 @@
 			const loader = new GLTFLoader();
 			loader.setDRACOLoader( dracoLoader );
 			const buf = bytes.buffer.slice( bytes.byteOffset, bytes.byteOffset + bytes.byteLength );
-			loader.parse( buf, '', ( gltf ) => resolve( { scene: gltf.scene, animations: gltf.animations } ), reject );
+			loader.parse( buf, '', ( gltf ) => {
+
+				// GLTFLoader's root is a plain Group, and the renderer ignores
+				// `background`/`fog`/`environment` on anything that isn't a real
+				// Scene — so a game's `ctx.scene.background = …` would silently do
+				// nothing. Re-root the loaded content in a true Scene (same name,
+				// extras and transform) so ctx.scene behaves like one.
+				let root = gltf.scene;
+				if ( ! root.isScene ) {
+
+					root = new THREE.Scene();
+					root.name = gltf.scene.name;
+					root.userData = gltf.scene.userData;
+					root.position.copy( gltf.scene.position );
+					root.quaternion.copy( gltf.scene.quaternion );
+					root.scale.copy( gltf.scene.scale );
+					root.add( ...gltf.scene.children.slice() );
+
+				}
+
+				resolve( { scene: root, animations: gltf.animations } );
+
+			}, reject );
 
 		} );
 
@@ -466,10 +488,6 @@
 
 		}
 
-		canvas.addEventListener( 'pointerdown', ( ev ) => emitPointer( 'down', ev ) );
-		canvas.addEventListener( 'pointermove', ( ev ) => emitPointer( 'move', ev ) );
-		canvas.addEventListener( 'pointerup',   ( ev ) => emitPointer( 'up', ev ) );
-
 		function emitKey( type, ev ) {
 
 			if ( type === 'down' ) held.add( ev.code ); else held.delete( ev.code );
@@ -478,8 +496,21 @@
 
 		}
 
-		window.addEventListener( 'keydown', ( ev ) => emitKey( 'down', ev ) );
-		window.addEventListener( 'keyup',   ( ev ) => emitKey( 'up', ev ) );
+		// makeInput() runs once per loadGame(), so every listener it adds is
+		// removed again by the next reload's cleanup pass — otherwise each
+		// Code-tab Save would stack another set. Held keys are also dropped on
+		// blur, since the matching keyup is never delivered to an unfocused
+		// window (a held throttle would otherwise stay "down" after a tab switch).
+		const listeners = [
+			[ canvas, 'pointerdown', ( ev ) => emitPointer( 'down', ev ) ],
+			[ canvas, 'pointermove', ( ev ) => emitPointer( 'move', ev ) ],
+			[ canvas, 'pointerup',   ( ev ) => emitPointer( 'up', ev ) ],
+			[ window, 'keydown', ( ev ) => emitKey( 'down', ev ) ],
+			[ window, 'keyup',   ( ev ) => emitKey( 'up', ev ) ],
+			[ window, 'blur',    () => { held.clear(); dragStartX = null; dragX = 0; } ],
+		];
+		for ( const [ target, type, fn ] of listeners ) target.addEventListener( type, fn );
+		cleanupCallbacks.push( () => { for ( const [ target, type, fn ] of listeners ) target.removeEventListener( type, fn ); } );
 
 		return {
 			onPointer: ( fn ) => pointerHandlers.push( fn ),
@@ -562,33 +593,80 @@
 
 	}
 
+	// $S( '.cls' ) also matches a GROUP when one of its descendants merely has a
+	// material (or other derived label) named `cls` — e.g. a material called
+	// "Trigger" makes every ancestor of that mesh a `.trigger`, and the root
+	// container would get a scene-sized sensor box. A body is only ever
+	// created for a mesh, or for a non-mesh node that carries the class in its
+	// own authored glTF extras.
+	function ownLabeled( $S, cls ) {
+
+		return $S( '.' + cls ).toArray().filter( ( n ) => n.isMesh || ( n.userData.customClasses || [] ).includes( cls ) );
+
+	}
+
+	// World-oriented collider: body at the node's WORLD position/rotation,
+	// shape from the node's own LOCAL bounds (scaled), offset to the bounds'
+	// centre — so a rotated gate/wall keeps its real footprint instead of
+	// the axis-aligned world bounds that setFromObject() returns.
+	function addOrientedShape( CANNON, node, body ) {
+
+		node.updateWorldMatrix( true, true );
+		const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3();
+		node.matrixWorld.decompose( pos, quat, scl );
+		const inv = node.matrixWorld.clone().invert();
+		const local = new THREE.Box3();
+		const m = new THREE.Matrix4();
+
+		node.traverse( ( o ) => {
+
+			if ( ! o.geometry ) return;
+			if ( ! o.geometry.boundingBox ) o.geometry.computeBoundingBox();
+			local.union( o.geometry.boundingBox.clone().applyMatrix4( m.multiplyMatrices( inv, o.matrixWorld ) ) );
+
+		} );
+
+		body.position.set( pos.x, pos.y, pos.z );
+		body.quaternion.set( quat.x, quat.y, quat.z, quat.w );
+		if ( local.isEmpty() ) { body.addShape( shapeFor( CANNON, node ) ); return; }
+
+		const size = local.getSize( new THREE.Vector3() ).multiply( new THREE.Vector3( Math.abs( scl.x ), Math.abs( scl.y ), Math.abs( scl.z ) ) );
+		const center = local.getCenter( new THREE.Vector3() ).multiply( scl );
+		const shape = node.userData && node.userData.collider === 'sphere'
+			? new CANNON.Sphere( Math.max( size.x, size.y, size.z ) / 2 || 0.5 )
+			: new CANNON.Box( new CANNON.Vec3( Math.max( size.x, 1e-3 ) / 2, Math.max( size.y, 1e-3 ) / 2, Math.max( size.z, 1e-3 ) / 2 ) );
+		body.addShape( shape, new CANNON.Vec3( center.x, center.y, center.z ) );
+
+	}
+
 	// Returns { boundBodies, kinematicBodies } — lists the fixed-step loop syncs
-	// each direction. Assumes labeled nodes are direct, untransformed children of
-	// the scene root (true of every bundled example) — a nested-parent scene
-	// would need a world->local conversion this harness intentionally omits.
+	// each direction. Static/trigger bodies use the node's world transform;
+	// dynamic/kinematic bodies still assume labeled nodes are direct,
+	// untransformed children of the scene root (their object<->body sync copies
+	// local position) — a nested-parent scene would need a world->local
+	// conversion this harness intentionally omits.
 	function applyPhysicsLabels( $S, CANNON, world, bindBody ) {
 
 		const kinematicBodies = [];
 
-		for ( const node of $S( '.static' ).toArray() ) {
+		for ( const node of ownLabeled( $S, 'static' ) ) {
 
-			const body = new CANNON.Body( { mass: 0, shape: shapeFor( CANNON, node ) } );
-			body.position.set( node.position.x, node.position.y, node.position.z );
-			body.quaternion.set( node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w );
+			const body = new CANNON.Body( { mass: 0 } );
+			addOrientedShape( CANNON, node, body );
 			world.addBody( body );
 
 		}
 
-		for ( const node of $S( '.trigger' ).toArray() ) {
+		for ( const node of ownLabeled( $S, 'trigger' ) ) {
 
-			const body = new CANNON.Body( { mass: 0, shape: shapeFor( CANNON, node ), isTrigger: true, collisionResponse: false } );
-			body.position.set( node.position.x, node.position.y, node.position.z );
+			const body = new CANNON.Body( { mass: 0, isTrigger: true, collisionResponse: false } );
+			addOrientedShape( CANNON, node, body );
 			world.addBody( body );
 			node.userData.physicsBody = body; // a game reads overlap itself via body.aabb / collide events
 
 		}
 
-		for ( const node of $S( '.dynamic' ).toArray() ) {
+		for ( const node of ownLabeled( $S, 'dynamic' ) ) {
 
 			const body = new CANNON.Body( { mass: 1, shape: shapeFor( CANNON, node ) } );
 			body.position.set( node.position.x, node.position.y, node.position.z );
@@ -609,7 +687,7 @@
 
 		}
 
-		for ( const node of $S( '.kinematic' ).toArray() ) {
+		for ( const node of ownLabeled( $S, 'kinematic' ) ) {
 
 			const CANNON_KINEMATIC = CANNON.Body.KINEMATIC;
 			const body = new CANNON.Body( { mass: 0, type: CANNON_KINEMATIC, shape: shapeFor( CANNON, node ) } );

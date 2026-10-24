@@ -406,6 +406,20 @@ is never inferred silently. Labels are authored as glTF node `extras`
 `userData.classes` to 3DOM's `customClasses` *before* `autoLabel` runs (which
 would otherwise overwrite `userData.classes` with its own auto-derived set).
 
+3DOM selectors also match **ancestors** of a matching mesh and **material
+names** (a material named `Trigger` makes every parent group a `.trigger`), so
+a body is only created for a mesh, or for a non-mesh node that carries the class
+in its own `customClasses` — an ancestor never gets a scene-sized sensor.
+`.static` and `.trigger` bodies use the node's **world** position and rotation
+and a box from its own *local* geometry bounds (scaled), so a rotated gate or
+wall keeps its real footprint; `.dynamic`/`.kinematic` bodies still assume a
+direct, untransformed child of the scene root (their object↔body sync copies
+local position).
+
+`ctx.scene` is a real `THREE.Scene` (the loaded glTF content re-rooted under
+it, keeping the root's name, extras and transform), so a game can set
+`ctx.scene.background`, `fog` or `environment` and have the renderer honour it.
+
 ## Repo layout
 
 ```
